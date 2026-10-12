@@ -115,8 +115,30 @@ export async function trash(id) {
 
 // Public (read-only) access for viewers: files shared "anyone with the link", read with the API key.
 export async function publicDownload(id) {
-  if (!cfg.apiKey) throw new Error('This viewer link needs an API key in config.js');
-  const r = await fetch(`${API}/files/${id}?alt=media&key=${cfg.apiKey}`);
-  if (!r.ok) throw new Error(`Could not load shared catalogue (${r.status})`);
-  return r;
+  if (!cfg.apiKey) throw new Error('This link needs the API key in config.js (see SETUP.md, step 2).');
+  // send the full page address as referrer, so an API key restricted to ".../Fountain-Pens-and-Inks/*" also works
+  const r = await fetch(`${API}/files/${id}?alt=media&key=${encodeURIComponent(cfg.apiKey)}`, { referrerPolicy: 'no-referrer-when-downgrade' });
+  if (r.ok) return r;
+  let msg = '', reason = '';
+  try {
+    const j = await r.json();
+    msg = j.error?.message || '';
+    reason = j.error?.details?.find(d => d.reason)?.reason || j.error?.errors?.[0]?.reason || j.error?.status || '';
+  } catch (e) { /* not JSON */ }
+  const site = `${location.protocol}//${location.host}/*`;
+  const hints = {
+    API_KEY_HTTP_REFERRER_BLOCKED: `The API key doesn't allow this website. In Google Cloud → APIs & Services → Credentials → your API key → Website restrictions, add ${site}`,
+    API_KEY_SERVICE_BLOCKED: 'The API key\'s "API restrictions" don\'t include Google Drive API. Tick Google Drive API there and save.',
+    SERVICE_DISABLED: 'Google Drive API is not enabled in the Google Cloud project that owns this API key (APIs & Services → Library → Google Drive API → Enable).',
+    accessNotConfigured: 'Google Drive API is not enabled in the Google Cloud project that owns this API key (APIs & Services → Library → Google Drive API → Enable).',
+    API_KEY_INVALID: 'The API key in config.js is not valid. Copy it again from Google Cloud → Credentials.',
+    keyInvalid: 'The API key in config.js is not valid. Copy it again from Google Cloud → Credentials.',
+    notFound: 'The shared file was not found. Turn on the read-only link in Settings, let the app sync, and copy the link again.',
+    insufficientFilePermissions: 'The collection is not shared yet. Turn on the read-only link in Settings and let the app sync.',
+  };
+  let hint = hints[reason] || '';
+  if (!hint && /referer|referrer/i.test(msg)) hint = hints.API_KEY_HTTP_REFERRER_BLOCKED;
+  if (!hint && /has not been used|is disabled/i.test(msg)) hint = hints.SERVICE_DISABLED;
+  if (!hint && r.status === 404) hint = hints.notFound;
+  throw new Error(`Could not load the shared collection (${r.status}${reason ? ' ' + reason : ''}). ${hint || msg}`);
 }
