@@ -1,6 +1,6 @@
 import { db } from './db.js';
 import * as drive from './drive.js';
-import { openEditor, DEFAULT_LAYOUT } from './editor.js';
+import { openEditor, DEFAULT_LAYOUT, cropNorm, dominantHex } from './editor.js';
 
 // ───────────────────────── constants ─────────────────────────
 const CFG = window.INK_CONFIG || {};
@@ -126,6 +126,21 @@ function changed() {
 const urlCache = new Map();
 async function storeImage(blob) { const id = uid('img'); await db.put('images', { id, blob }); return id; }
 function trashImage(id) { if (!id) return; const d = S.imageMap[id]; if (d) setMeta('trash', [...(S.meta.trash || []), d]); }
+function applyLayoutCSS() {
+  // ink tiles take the swatch's own proportions, so the whole swatch is visible
+  const L = S.layout || DEFAULT_LAYOUT; const ar = (L.swatch[2] * L.aspect) / L.swatch[3];
+  document.documentElement.style.setProperty('--sw-ar', String(Math.max(0.5, Math.min(2, ar)).toFixed(3)));
+}
+async function imageBlob(id) {
+  if (!id) return null;
+  let blob = null;
+  if (!RO) { const rec = await db.get('images', id); blob = rec?.blob; }
+  if (!blob && S.imageMap[id]) {
+    if (RO) blob = await (await drive.publicDownload(S.imageMap[id])).blob();
+    else if (drive.hasToken()) { blob = await (await drive.download(S.imageMap[id])).blob(); await db.put('images', { id, blob }); }
+  }
+  return blob;
+}
 async function imageURL(id) {
   if (!id) return null;
   if (urlCache.has(id)) return urlCache.get(id);
@@ -174,7 +189,7 @@ async function mergeCatalog(remote) {
     if (toSave.length) { changedLocal = true; await db.putMany(key, toSave); S[key] = [...map.values()]; }
   }
   if (remote.images) { const before = Object.keys(S.imageMap).length; S.imageMap = { ...remote.images, ...S.imageMap }; if (Object.keys(S.imageMap).length !== before) await db.setMeta('imageMap', S.imageMap); }
-  if ((remote.layoutUpdatedAt || 0) > S.layoutUpdatedAt) { S.layout = remote.layout; S.layoutUpdatedAt = remote.layoutUpdatedAt; await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); changedLocal = true; }
+  if ((remote.layoutUpdatedAt || 0) > S.layoutUpdatedAt) { S.layout = remote.layout; S.layoutUpdatedAt = remote.layoutUpdatedAt; await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); applyLayoutCSS(); changedLocal = true; }
   if ((remote.titleUpdatedAt || 0) > S.titleUpdatedAt) { S.title = remote.title; S.titleUpdatedAt = remote.titleUpdatedAt; await db.setMeta('title', { title: S.title, at: S.titleUpdatedAt }); changedLocal = true; }
   return changedLocal;
 }
@@ -644,7 +659,7 @@ function showInk(id) {
       <div class="mh"><div><h2>${esc(i.name)}</h2><p class="sub">${esc(i.brand)}${i.collection ? ' · ' + esc(i.collection) : ''}</p></div><button class="icon-btn" data-close aria-label="Close">${I.x}</button></div>
       <div class="mb detail">
         <div class="photos">
-          ${ph.swatch ? `<button class="ph-main" data-lb="${esc(ph.swatch)}"><img data-img="${esc(ph.swatch)}" alt="Swatch"></button>` : `<div class="ph-main colour" style="background:${esc(inkColor(i))}">${RO ? '' : `<button class="btn small" id="addPh">${I.camera}Add swatch card photo</button>`}</div>`}
+          ${ph.swatch ? `<button class="ph-main ink" data-lb="${esc(ph.swatch)}"><img data-img="${esc(ph.swatch)}" alt="Swatch"></button>` : `<div class="ph-main colour" style="background:${esc(inkColor(i))}">${RO ? '' : `<button class="btn small" id="addPh">${I.camera}Add swatch card photo</button>`}</div>`}
           ${ph.writing ? `<button class="ph-wr" data-lb="${esc(ph.writing)}"><img data-img="${esc(ph.writing)}" alt="Writing sample"></button>` : ''}
           ${ph.card ? `<button class="link sm" data-lb="${esc(ph.card)}">${I.eye} View whole card</button>` : ''}
         </div>
@@ -730,7 +745,7 @@ function editInk(ink, { scan = false } = {}) {
     <form class="mb form" id="inkF" autocomplete="off">
       <div class="ph-edit">
         <div class="ph-slots" id="slots"></div>
-        <div class="row wrap"><button type="button" class="btn" id="scan">${I.camera}Scan swatch card</button><button type="button" class="link sm" id="swOnly">Swatch only</button><button type="button" class="link sm" id="wrOnly">Writing sample only</button></div>
+        <div class="row wrap"><button type="button" class="btn" id="scan">${I.camera}Scan swatch card</button><button type="button" class="link sm" id="recrop">Adjust boxes</button><button type="button" class="link sm" id="swOnly">Swatch only</button><button type="button" class="link sm" id="wrOnly">Writing sample only</button></div>
       </div>
       <div class="row2">
         <label class="lbl">Brand<input name="brand" list="dlBrand" required value="${esc(d.brand)}"></label>
@@ -794,7 +809,7 @@ function editInk(ink, { scan = false } = {}) {
     if (!r) return;
     setPending('card', r.card); setPending('swatch', r.swatch); setPending('writing', r.writing);
     form.hex.value = r.hex; form.hexp.value = r.hex; autoGroup(r.hex);
-    if (r.layout) { S.layout = r.layout; S.layoutUpdatedAt = Date.now(); await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); toast('Box positions remembered for next cards'); }
+    if (r.layout) { S.layout = r.layout; S.layoutUpdatedAt = Date.now(); await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); applyLayoutCSS(); toast('Box positions remembered for next cards'); }
     drawSlots();
   }
   async function doSingle(k) {
@@ -805,6 +820,17 @@ function editInk(ink, { scan = false } = {}) {
     if (k === 'swatch') { form.hex.value = r.hex; form.hexp.value = r.hex; showSugg(r.hex); }
     drawSlots();
   }
+  async function doRecrop() {
+    const blob = pending.card?.blob || await imageBlob(d.photos.card).catch(() => null);
+    if (!blob) { toast('No saved card photo for this ink yet — scan the card first', true); return; }
+    const r = await openEditor({ file: blob, mode: 'card', layout: S.layout, title: 'Adjust boxes', recrop: true });
+    if (!r) return;
+    setPending('swatch', r.swatch); setPending('writing', r.writing);
+    form.hex.value = r.hex; form.hexp.value = r.hex; autoGroup(r.hex);
+    if (r.layout) { S.layout = { ...r.layout, aspect: S.layout.aspect }; S.layoutUpdatedAt = Date.now(); await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); applyLayoutCSS(); toast('Box positions remembered for next cards'); }
+    drawSlots();
+  }
+  $('#recrop', el).onclick = doRecrop;
   $('#scan', el).onclick = doScan;
   $('#swOnly', el).onclick = () => doSingle('swatch');
   $('#wrOnly', el).onclick = () => doSingle('writing');
@@ -1068,14 +1094,15 @@ function viewSettings(m) {
     <section class="card"><h2 class="h2">Swatch card layout</h2>
       <p class="muted">Where the swatch and writing sample sit on your cards. Adjust the boxes while scanning a card and tick “Remember box positions”.</p>
       <p>Card ratio ${esc(S.layout.aspect)} · Swatch ${S.layout.swatch.map(v => Math.round(v * 100)).join('/')} · Writing ${S.layout.writing.map(v => Math.round(v * 100)).join('/')}</p>
-      <button class="btn small ghost" id="layReset">Reset to default</button>
+      <div class="row wrap"><button class="btn small" id="recropAll">Re-cut all saved cards</button><button class="btn small ghost" id="layReset">Reset to default</button></div>
+      <p class="muted small">Every scan keeps the whole straightened card, so after changing the box positions you can re-cut the swatch and writing sample of all inks at once.</p>
     </section>
     <section class="card"><h2 class="h2">Your data</h2>
       <div class="row wrap"><button class="btn" id="xlsx">Export to Excel</button><button class="btn" id="bak">Download backup (.json)</button><button class="btn ghost" id="restore">Restore from backup…</button></div>
       <p class="muted">The backup file has all data but not the photos (those are in your Google Drive folder).</p>
     </section>
     <section class="card"><h2 class="h2">Install</h2><p class="muted">On Android: Chrome menu ⋮ → <b>Add to Home screen / Install app</b>. On Windows: the install icon at the right of the Chrome or Edge address bar.</p>${S.installEvt ? '<button class="btn primary" id="install">Install now</button>' : ''}</section>
-    <p class="muted center small">Fountain Pens and Inks · v1.2</p>`;
+    <p class="muted center small">Fountain Pens and Inks · v1.4</p>`;
   $('#titleSave', m).onclick = async () => { S.title = $('#title', m).value.trim() || 'Fountain Pens and Inks'; S.titleUpdatedAt = Date.now(); await db.setMeta('title', { title: S.title, at: S.titleUpdatedAt }); changed(); toast('Saved'); };
   $('#syncNow', m) && ($('#syncNow', m).onclick = () => sync(true));
   $('#signOut', m) && ($('#signOut', m).onclick = () => { drive.signOut(); S.syncState = 'signin'; updateSyncBadge(); renderView(); });
@@ -1087,7 +1114,8 @@ function viewSettings(m) {
   };
   $('#pub', m).onchange = async e => { await setMeta('public', e.target.checked); renderView(); sync(true); };
   $('#copy', m) && ($('#copy', m).onclick = () => { navigator.clipboard?.writeText(link).then(() => toast('Link copied'), () => { $('#pubLink', m).select(); }); });
-  $('#layReset', m).onclick = async () => { S.layout = DEFAULT_LAYOUT; S.layoutUpdatedAt = Date.now(); await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); changed(); };
+  $('#layReset', m).onclick = async () => { S.layout = DEFAULT_LAYOUT; S.layoutUpdatedAt = Date.now(); await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); applyLayoutCSS(); changed(); toast('Box positions reset'); };
+  $('#recropAll', m).onclick = () => recropAll();
   $('#xlsx', m).onclick = exportExcel;
   $('#bak', m).onclick = () => downloadBlob(new Blob([JSON.stringify(buildCatalog(), null, 1)], { type: 'application/json' }), `fountain-pens-and-inks-backup-${today()}.json`);
   $('#restore', m).onclick = () => {
@@ -1099,6 +1127,32 @@ function viewSettings(m) {
     inp.click();
   };
   $('#install', m) && ($('#install', m).onclick = () => S.installEvt.prompt());
+}
+async function recropAll() {
+  const list = live(S.inks).filter(i => i.photos?.card);
+  if (!list.length) { toast('No scanned cards yet'); return; }
+  if (!(await confirmBox(`Re-cut the swatch and writing sample of ${plural(list.length, 'ink')} using the current box positions?`, 'Re-cut'))) return;
+  let done = 0, failed = 0;
+  for (const ink of list) {
+    try {
+      const blob = await imageBlob(ink.photos.card);
+      if (!blob) { failed++; continue; }
+      const bmp = await createImageBitmap(blob);
+      const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height; c.getContext('2d').drawImage(bmp, 0, 0);
+      const fit = (cv, max) => { const k = Math.min(1, max / Math.max(cv.width, cv.height)); const o = document.createElement('canvas'); o.width = Math.round(cv.width * k); o.height = Math.round(cv.height * k); o.getContext('2d').drawImage(cv, 0, 0, o.width, o.height); return o; };
+      const jpg = cv => new Promise(r => cv.toBlob(r, 'image/jpeg', 0.88));
+      const sw = cropNorm(c, S.layout.swatch), wr = cropNorm(c, S.layout.writing);
+      const d = JSON.parse(JSON.stringify(ink));
+      trashImage(ink.photos.swatch); trashImage(ink.photos.writing);
+      d.photos.swatch = await storeImage(await jpg(fit(sw, 700)));
+      d.photos.writing = await storeImage(await jpg(fit(wr, 1400)));
+      d.hex = dominantHex(sw);
+      if (d.colourAuto || !d.colourGroup) { d.colourGroup = suggestGroup(d.hex); d.colourAuto = true; }
+      await saveRec('ink', d);
+      toast(`Re-cutting… ${++done} of ${list.length}`);
+    } catch (e) { console.warn(e); failed++; }
+  }
+  toast(`Re-cut ${plural(done, 'card')}${failed ? ` · ${failed} couldn't be loaded (sign in to Google and try again)` : ''}`, !!failed);
 }
 function downloadBlob(blob, name) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
@@ -1136,6 +1190,10 @@ async function loadLocal() {
   ]);
   Object.assign(S, { inks, pens, fills, meta: local || {}, imageMap: imageMap || {} });
   if (layout) { S.layout = layout.layout; S.layoutUpdatedAt = layout.at; }
+  // box positions saved from an earlier default follow the new default
+  const OLD = { writing: ['[0.03,0.73,0.94,0.255]', '[0.03,0.73,0.94,0.142]'], swatch: ['[0.085,0.065,0.83,0.59]'] };
+  if (S.layout) for (const k of ['swatch', 'writing']) if (OLD[k].includes(JSON.stringify(S.layout[k]))) S.layout = { ...S.layout, [k]: DEFAULT_LAYOUT[k] };
+  applyLayoutCSS();
   if (title) { S.title = title.title; S.titleUpdatedAt = title.at; }
   if (!S.meta.seeded && !inks.length) {
     try {
@@ -1150,6 +1208,8 @@ async function loadLocal() {
 async function loadShared() {
   const data = await (await drive.publicDownload(VIEW_ID)).json();
   Object.assign(S, { inks: data.inks || [], pens: data.pens || [], fills: data.fills || [], imageMap: data.images || {}, title: data.title || S.title });
+  if (data.layout) S.layout = data.layout;
+  applyLayoutCSS();
 }
 
 async function boot() {

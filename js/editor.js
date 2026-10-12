@@ -9,8 +9,8 @@
 // Box positions are adjustable in the editor.
 export const DEFAULT_LAYOUT = {
   aspect: 0.6306, // width / height of the card
-  swatch: [0.085, 0.065, 0.83, 0.59],
-  writing: [0.03, 0.73, 0.94, 0.255],
+  swatch: [0.085, 0.065, 0.815, 0.59], // right edge kept inside the ink, which tends to bleed on that side
+  writing: [0.03, 0.73, 0.94, 0.15], // runs down to just above the printed brand name
 };
 
 const MAX_SRC = 3000;      // working resolution of the original photo
@@ -479,7 +479,8 @@ export function dominantHex(canvas) {
 // ---------- UI ----------
 const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 
-export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title = 'Edit photo' }) {
+export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title = 'Edit photo', recrop = false }) {
+  // recrop: the file is an already straightened, colour-corrected card — go straight to the boxes
   return new Promise(async resolve => {
     const root = el('div', 'ed');
     root.innerHTML = `
@@ -515,11 +516,12 @@ export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title
     const view = scaledCanvas(src, 1400);
     let quad = null;
     let L = JSON.parse(JSON.stringify(layout || DEFAULT_LAYOUT));
-    try { quad = detectCard(src, mode === 'card' ? L : null); } catch (e) { console.warn(e); }
+    if (!recrop) { try { quad = detectCard(src, mode === 'card' ? L : null); } catch (e) { console.warn(e); } }
+    else quad = [[0, 0], [src.width, 0], [src.width, src.height], [0, src.height]];
     const detected = !!quad;
     const fullQuad = () => { const m = 0.03; const w = src.width, h = src.height; return [[w * m, h * m], [w * (1 - m), h * m], [w * (1 - m), h * (1 - m)], [w * m, h * (1 - m)]]; };
     if (!quad) quad = fullQuad();
-    let step = 1, warped = null, preview = null, white = null, wbOn = true, onResize = () => {};
+    let step = 1, warped = null, preview = null, white = null, wbOn = !recrop, onResize = () => {};
 
     // fit a canvas into the stage
     function fit(c) {
@@ -702,6 +704,6 @@ export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title
     };
     window.addEventListener('resize', resizeH);
     busy(false);
-    step1();
+    if (recrop) { buildWarp(); step2(); } else step1();
   });
 }
