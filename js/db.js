@@ -1,5 +1,5 @@
 // IndexedDB storage: inks, pens, fills, images (blobs), meta (settings / sync state)
-const DB_NAME = 'ink-catalog';
+const DB_NAME = 'fountain-pens-and-inks';
 const DB_VERSION = 1;
 const STORES = ['inks', 'pens', 'fills', 'images', 'meta'];
 let dbp = null;

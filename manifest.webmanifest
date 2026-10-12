@@ -1,7 +1,7 @@
 {
-  "name": "Ink Catalog",
-  "short_name": "Inks",
-  "description": "Fountain pen ink and pen catalogue",
+  "name": "Fountain Pens and Inks",
+  "short_name": "Pens & Inks",
+  "description": "My fountain pens and inks",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

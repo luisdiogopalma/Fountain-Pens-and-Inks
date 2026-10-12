@@ -26,7 +26,7 @@ const FILLING = ['Cartridge / converter', 'Piston', 'Vacuum', 'Eyedropper', 'Lev
 const S = {
   inks: [], pens: [], fills: [],
   layout: DEFAULT_LAYOUT, layoutUpdatedAt: 0,
-  title: 'My ink collection', titleUpdatedAt: 0,
+  title: 'Fountain Pens and Inks', titleUpdatedAt: 0,
   imageMap: {}, // local image id -> Drive file id
   meta: {},     // local-only: folderId, photosId, catalogId, lastSync, public, trash[]
   view: 'inked',
@@ -154,7 +154,7 @@ function hydrate(root = document) {
 // ───────────────────────── catalog file (sync / backup) ─────────────────────────
 function buildCatalog() {
   return {
-    app: 'ink-catalog', version: 1,
+    app: 'fountain-pens-and-inks', version: 1,
     title: S.title, titleUpdatedAt: S.titleUpdatedAt,
     layout: S.layout, layoutUpdatedAt: S.layoutUpdatedAt,
     inks: S.inks, pens: S.pens, fills: S.fills, images: S.imageMap,
@@ -192,13 +192,13 @@ async function sync(interactive) {
     S.syncing = true; S.syncState = 'syncing'; updateSyncBadge();
     const m = S.meta;
     let folderId = m.folderId && (await drive.fileInfo(m.folderId));
-    folderId = folderId && !folderId.trashed ? m.folderId : await drive.findOrCreateFolder('Ink Catalog');
+    folderId = folderId && !folderId.trashed ? m.folderId : await drive.findOrCreateFolder('Fountain Pens and Inks');
     let photosId = m.photosId && (await drive.fileInfo(m.photosId));
     photosId = photosId && !photosId.trashed ? m.photosId : await drive.findOrCreateFolder('photos', folderId);
     await setMeta('folderId', folderId); await setMeta('photosId', photosId);
 
     let cat = m.catalogId ? await drive.fileInfo(m.catalogId) : null;
-    if (!cat || cat.trashed) cat = await drive.findFile('catalog.json', folderId);
+    if (!cat || cat.trashed) cat = await drive.findFile('fountain-pens-and-inks.json', folderId);
     let remoteStr = '';
     if (cat) {
       const remote = await (await drive.download(cat.id)).json();
@@ -229,7 +229,7 @@ async function sync(interactive) {
     // upload catalog if anything differs
     const localStr = stableJSON(buildCatalog());
     if (!cat || localStr !== remoteStr) {
-      const r = await drive.upload({ id: cat?.id, name: 'catalog.json', parent: folderId, mime: 'application/json', body: localStr });
+      const r = await drive.upload({ id: cat?.id, name: 'fountain-pens-and-inks.json', parent: folderId, mime: 'application/json', body: localStr });
       cat = { id: r.id };
     }
     await setMeta('catalogId', cat.id);
@@ -1053,7 +1053,7 @@ function viewSettings(m) {
     <section class="card"><h2 class="h2">Google Drive sync</h2>
       ${conf ? `
         <p>${signed ? `Connected. Last sync: <b>${mt.lastSync ? esc(new Date(mt.lastSync).toLocaleString('en-GB')) : 'never'}</b>.` : 'Not signed in on this device.'} ${S.syncState === 'error' ? `<br><span class="err-t">${esc(S.syncMsg)}</span>` : ''}</p>
-        <p class="muted">Everything is saved on this device first, so the app works offline. Syncing copies it to a folder called <b>Ink Catalog</b> in your Google Drive (data file + photos), and brings in changes made on your other devices.</p>
+        <p class="muted">Everything is saved on this device first, so the app works offline. Syncing copies it to a folder called <b>Fountain Pens and Inks</b> in your Google Drive (data file + photos), and brings in changes made on your other devices.</p>
         <div class="row wrap"><button class="btn primary" id="syncNow">${I.sync}${signed ? 'Sync now' : 'Sign in & sync'}</button>${signed ? '<button class="btn ghost" id="signOut">Sign out</button>' : ''}</div>`
       : `<p>Sync is not set up yet — the collection is saved on this device only.</p><p class="muted">Follow <b>SETUP.md</b> to create a free Google Client ID (≈15 min), then paste it into <code>config.js</code> or below.</p>`}
       <details class="adv"><summary>Google keys on this device</summary>
@@ -1075,8 +1075,8 @@ function viewSettings(m) {
       <p class="muted">The backup file has all data but not the photos (those are in your Google Drive folder).</p>
     </section>
     <section class="card"><h2 class="h2">Install</h2><p class="muted">On Android: Chrome menu ⋮ → <b>Add to Home screen / Install app</b>. On Windows: the install icon at the right of the Chrome or Edge address bar.</p>${S.installEvt ? '<button class="btn primary" id="install">Install now</button>' : ''}</section>
-    <p class="muted center small">Ink Catalog · v1.1</p>`;
-  $('#titleSave', m).onclick = async () => { S.title = $('#title', m).value.trim() || 'My ink collection'; S.titleUpdatedAt = Date.now(); await db.setMeta('title', { title: S.title, at: S.titleUpdatedAt }); changed(); toast('Saved'); };
+    <p class="muted center small">Fountain Pens and Inks · v1.2</p>`;
+  $('#titleSave', m).onclick = async () => { S.title = $('#title', m).value.trim() || 'Fountain Pens and Inks'; S.titleUpdatedAt = Date.now(); await db.setMeta('title', { title: S.title, at: S.titleUpdatedAt }); changed(); toast('Saved'); };
   $('#syncNow', m) && ($('#syncNow', m).onclick = () => sync(true));
   $('#signOut', m) && ($('#signOut', m).onclick = () => { drive.signOut(); S.syncState = 'signin'; updateSyncBadge(); renderView(); });
   $('#keysSave', m).onclick = () => {
@@ -1089,11 +1089,11 @@ function viewSettings(m) {
   $('#copy', m) && ($('#copy', m).onclick = () => { navigator.clipboard?.writeText(link).then(() => toast('Link copied'), () => { $('#pubLink', m).select(); }); });
   $('#layReset', m).onclick = async () => { S.layout = DEFAULT_LAYOUT; S.layoutUpdatedAt = Date.now(); await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); changed(); };
   $('#xlsx', m).onclick = exportExcel;
-  $('#bak', m).onclick = () => downloadBlob(new Blob([JSON.stringify(buildCatalog(), null, 1)], { type: 'application/json' }), `ink-catalog-backup-${today()}.json`);
+  $('#bak', m).onclick = () => downloadBlob(new Blob([JSON.stringify(buildCatalog(), null, 1)], { type: 'application/json' }), `fountain-pens-and-inks-backup-${today()}.json`);
   $('#restore', m).onclick = () => {
     const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/json,.json';
     inp.onchange = async () => {
-      try { const data = JSON.parse(await inp.files[0].text()); if (data.app !== 'ink-catalog') throw new Error('Not an Ink Catalog backup'); await mergeCatalog(data); changed(); toast('Backup merged'); }
+      try { const data = JSON.parse(await inp.files[0].text()); if (!['fountain-pens-and-inks', 'ink-catalog'].includes(data.app)) throw new Error('Not a Fountain Pens and Inks backup'); await mergeCatalog(data); changed(); toast('Backup merged'); }
       catch (e) { toast(e.message, true); }
     };
     inp.click();
@@ -1125,7 +1125,7 @@ async function exportExcel() {
       ws['!cols'] = Object.keys(rows[0] || {}).map(k => ({ wch: Math.min(40, Math.max(k.length + 2, ...rows.map(r => String(r[k] ?? '').length + 1))) }));
       XLSX.utils.book_append_sheet(wb, ws, n);
     }
-    XLSX.writeFile(wb, `ink-catalog-${today()}.xlsx`);
+    XLSX.writeFile(wb, `fountain-pens-and-inks-${today()}.xlsx`);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1159,7 +1159,7 @@ async function boot() {
   } catch (e) {
     document.body.innerHTML = `<div class="fatal"><h1>Could not open the collection</h1><p>${esc(e.message)}</p></div>`; return;
   }
-  document.title = RO ? `${S.title} (view only)` : 'Ink Catalog';
+  document.title = RO ? `${S.title} (view only)` : 'Fountain Pens and Inks';
   shell();
   window.addEventListener('hashchange', setView);
   setView();
