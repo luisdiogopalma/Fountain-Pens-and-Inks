@@ -410,3 +410,18 @@ label.btn { position: relative; cursor: pointer; }
 .bars b.money { min-width: 54px; }
 .bars li:has(.money) { grid-template-columns: minmax(0, 1fr) 1fr 64px; }
 .fill-form .search { flex: none; }
+
+/* v1.7 */
+.pen-ph2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
+.pen-ph2 .ph-main { position: relative; aspect-ratio: 4 / 3; }
+.pen-st { margin: 0; width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-radius: 12px; font-size: 14px; background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--text); }
+.pen-st svg { color: var(--warn); }
+.pen-st span { flex: 1; }
+.pen-st.lost, .pen-st.gone { background: color-mix(in srgb, var(--danger) 10%, transparent); } .pen-st.lost svg { color: var(--danger); }
+.pen-st.borrowed { background: var(--accent-2); } .pen-st.borrowed svg { color: var(--accent); }
+.pen-badge { align-self: flex-start; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 99px; margin: 3px 0 2px; background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.pen-badge.borrowed { background: var(--accent-2); color: var(--accent); }
+.pen-badge.lost, .pen-badge.gone { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.pill.away { text-align: left; }
+.chip svg { width: 14px; height: 14px; }
+#fs + .row { margin-top: 8px; } #fs + .row input { font-weight: 400; }
