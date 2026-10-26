@@ -17,11 +17,21 @@ export const COLOURS = [
 const COLOUR_HEX = Object.fromEntries(COLOURS);
 const PROPS = [['sheen', 'Sheen'], ['shimmer', 'Shimmer'], ['duochrome', 'Duo-chrome'], ['ironGall', 'Iron gall'], ['scented', 'Scented']];
 const STATUS = [['owned', 'In collection'], ['empty', 'Finished'], ['lost', 'Lost'], ['gone', 'Given away / sold']];
-const PEN_STATUS = [['owned', 'In collection'], ['gone', 'Sold / given away']];
-const NIB_SIZES = ['EF', 'F', 'MF', 'M', 'B', 'BB', 'Stub', 'Italic', 'Architect', 'Fude', 'Flex', 'Music'];
+const PEN_STATUS = [['owned', 'In collection'], ['borrowed', 'Lent to someone'], ['repair', 'Needs repair'], ['lost', 'Lost'], ['gone', 'Sold / given away']];
+const penPhoto = p => p?.photos?.closed || p?.photos?.pen || p?.photos?.posted || null; // 'pen' = photos from before v1.7
+const fillingArr = p => Array.isArray(p?.filling) ? p.filling : (p?.filling ? [p.filling] : []);
+const penAway = p => ['borrowed', 'lost', 'gone'].includes(p?.status);
+function penStatusText(p) {
+  const s = p.status || 'owned';
+  if (s === 'borrowed') return `Lent to ${p.borrowedBy || 'someone'}${p.borrowedAt ? ' since ' + fmtDate(p.borrowedAt) : ''}`;
+  if (s === 'repair') return `Needs repair${p.repairNote ? ': ' + p.repairNote : ''}`;
+  if (s === 'lost') return `Lost${p.lostAt ? ' since ' + fmtDate(p.lostAt) : ''}`;
+  return PEN_STATUS.find(x => x[0] === s)?.[1] || s;
+}
+const NIB_SIZES = ['EF', 'F', 'SF', 'MF', 'M', 'SM', 'B', 'BB', 'Stub', 'Italic', 'Architect', 'Fude', 'Flex', 'Music'];
 const NIB_MATERIALS = ['Steel', 'Gold 14k', 'Gold 18k', 'Gold 21k', 'Titanium'];
 const PEN_MATERIALS = ['Resin', 'Acrylic', 'Celluloid', 'Ebonite', 'Plastic', 'Aluminium', 'Brass', 'Stainless steel', 'Titanium', 'Wood', 'Urushi lacquer', 'Silver'];
-const FILLING = ['Cartridge / converter', 'Piston', 'Vacuum', 'Eyedropper', 'Lever', 'Button'];
+const FILLING = ['Cartridge', 'Converter', 'Piston', 'Vacuum', 'Eyedropper', 'Lever', 'Button', 'Aerometric'];
 
 // ───────────────────────── state ─────────────────────────
 const S = {
@@ -39,7 +49,7 @@ const S = {
 const FKEY = 'ink.filters.v1';
 const DEF_F = {
   inks: { q: '', brand: [], collection: [], colour: [], size: [], props: [], status: [], usage: '', photo: '', acquired: [], shop: [], sort: 'brand', layout: 'grid' },
-  pens: { q: '', brand: [], nibSize: [], nibMaterial: [], material: [], inked: '', status: [], sort: 'brand' },
+  pens: { q: '', brand: [], nibSize: [], nibMaterial: [], material: [], filling: [], inked: '', status: [], sort: 'brand' },
 };
 let F = JSON.parse(JSON.stringify(DEF_F));
 try { const saved = JSON.parse(localStorage.getItem(FKEY) || 'null'); if (saved) F = { inks: { ...DEF_F.inks, ...saved.inks }, pens: { ...DEF_F.pens, ...saved.pens } }; } catch (e) {}
@@ -403,14 +413,15 @@ function viewInked(m) {
   const act = activeFills().sort((a, b) => { const A = cleanStatus(a), B = cleanStatus(b); return (B.due - A.due) || (A.left - B.left) || cmp(b.start, a.start); });
   const dueN = act.filter(f => cleanStatus(f).due).length;
   const inkedPens = new Set(act.map(f => f.penId));
-  const empty = live(S.pens).filter(p => p.status !== 'gone' && !inkedPens.has(p.id)).sort((a, b) => cmp(penTitle(a), penTitle(b)));
+  const empty = live(S.pens).filter(p => !penAway(p) && p.status !== 'repair' && !inkedPens.has(p.id)).sort((a, b) => cmp(penTitle(a), penTitle(b)));
+  const away = live(S.pens).filter(p => ['borrowed', 'repair', 'lost'].includes(p.status)).sort((a, b) => cmp(a.status, b.status) || cmp(penTitle(a), penTitle(b)));
   m.innerHTML = `
     <header class="vh"><div><h1>Inked now</h1><p class="sub">${plural(act.length, 'pen')} inked${empty.length ? ` · ${empty.length} empty` : ''}${dueN ? ` · <b class="due-t">${dueN} due for cleaning</b>` : ''}</p></div>
       ${RO ? '' : `<div class="row"><button class="btn" id="suggestBtn">${I.spark}<span>Suggest an ink</span></button><button class="btn primary" id="inkBtn">${I.refill}<span>Ink a pen</span></button></div>`}</header>
     ${act.length ? `<div class="inked">${act.map(f => {
       const p = byId(S.pens, f.penId), i = byId(S.inks, f.inkId), cs = cleanStatus(f);
       return `<article class="inked-card ${cs.due ? 'due' : cs.soon ? 'soon' : ''}" style="--ink:${esc(inkColor(i))}">
-        <button class="ic-pen" data-pen="${esc(f.penId)}">${p?.photos?.pen ? `<img data-img="${esc(p.photos.pen)}" alt="">` : `<span class="ph">${I.pen}</span>`}</button>
+        <button class="ic-pen" data-pen="${esc(f.penId)}">${penPhoto(p) ? `<img data-img="${esc(penPhoto(p))}" alt="">` : `<span class="ph">${I.pen}</span>`}</button>
         <div class="ic-body">
           <button class="ic-t" data-pen="${esc(f.penId)}"><b>${esc(penTitle(p))}</b><span>${esc([p?.nibSize, p?.nibMaterial].filter(Boolean).join(' · '))}</span></button>
           <button class="ic-ink" data-ink="${esc(f.inkId)}"><span class="dot lg" style="background:${esc(inkColor(i))}">${i?.photos?.swatch ? `<img data-img="${esc(i.photos.swatch)}" alt="">` : ''}</span><span><b>${esc(i?.name || '?')}</b><small>${esc(i ? i.brand + (i.collection ? ' · ' + i.collection : '') : '')}</small></span></button>
@@ -420,7 +431,8 @@ function viewInked(m) {
           ${RO ? '' : `<div class="ic-a"><button class="btn small" data-refill="${esc(f.id)}">${I.refill}Refill</button><button class="btn small" data-change="${esc(f.penId)}">Change ink</button><button class="btn small ghost" data-clean="${esc(f.id)}">${I.clean}Clean</button></div>`}
         </div></article>`;
     }).join('')}</div>` : `<div class="empty">${I.inked}<p>${live(S.pens).length ? 'No pens are inked right now.' : 'Add your pens first, then record which ink goes in each one.'}</p>${RO ? '' : live(S.pens).length ? '<button class="btn primary" id="inkBtn2">Ink a pen</button>' : '<button class="btn primary" id="addPen0">Add a pen</button>'}</div>`}
-    ${empty.length ? `<h2 class="h2">Empty pens</h2><div class="chips-row">${empty.map(p => `<button class="pill" data-fillpen="${esc(p.id)}">${p.photos?.pen ? `<img data-img="${esc(p.photos.pen)}" alt="">` : ''}${esc(penTitle(p))}${RO ? '' : ' <span class="muted">+ ink</span>'}</button>`).join('')}</div>` : ''}`;
+    ${away.length ? `<h2 class="h2">Lent out, in repair or lost</h2><div class="chips-row">${away.map(p => `<button class="pill away ${esc(p.status)}" data-pen="${esc(p.id)}">${penPhoto(p) ? `<img data-img="${esc(penPhoto(p))}" alt="">` : ''}<span><b>${esc(penTitle(p))}</b> <span class="muted">· ${esc(penStatusText(p))}</span></span></button>`).join('')}</div>` : ''}
+    ${empty.length ? `<h2 class="h2">Empty pens</h2><div class="chips-row">${empty.map(p => `<button class="pill" data-fillpen="${esc(p.id)}">${penPhoto(p) ? `<img data-img="${esc(penPhoto(p))}" alt="">` : ''}${esc(penTitle(p))}${RO ? '' : ' <span class="muted">+ ink</span>'}</button>`).join('')}</div>` : ''}`;
   $('#inkBtn', m) && ($('#inkBtn', m).onclick = () => inkAPen({}));
   $('#suggestBtn', m) && ($('#suggestBtn', m).onclick = () => suggestInk());
   $('#inkBtn2', m) && ($('#inkBtn2', m).onclick = () => inkAPen({}));
@@ -452,7 +464,7 @@ async function clean(fillId) {
 
 function inkAPen({ penId = '', inkId = '' }) {
   const st = { penId, inkId, q: '', pq: '', date: today(), note: '' };
-  const pens = live(S.pens).filter(p => p.status !== 'gone').sort((a, b) => cmp(penTitle(a), penTitle(b)));
+  const pens = live(S.pens).filter(p => !penAway(p)).sort((a, b) => cmp(penTitle(a), penTitle(b)));
   if (!pens.length) { toast('Add a pen first'); return editPen(); }
   const m = openModal(`
     <div class="mh"><h2>Ink a pen</h2><button class="icon-btn" data-close aria-label="Close">${I.x}</button></div>
@@ -468,7 +480,7 @@ function inkAPen({ penId = '', inkId = '' }) {
   function drawPens() {
     $('#penPick', el).innerHTML = `<div class="pick-pens">${pens.map(p => {
       const cf = currentFill(p.id), ci = cf && byId(S.inks, cf.inkId);
-      return `<button class="pp ${st.penId === p.id ? 'on' : ''}" data-p="${esc(p.id)}">${p.photos?.pen ? `<img data-img="${esc(p.photos.pen)}" alt="">` : `<span class="ph">${I.pen}</span>`}<span><b>${esc(penTitle(p))}</b><small>${ci ? `<i class="dot" style="background:${esc(inkColor(ci))}"></i>${esc(ci.name)}` : 'empty'}</small></span></button>`;
+      return `<button class="pp ${st.penId === p.id ? 'on' : ''}" data-p="${esc(p.id)}">${penPhoto(p) ? `<img data-img="${esc(penPhoto(p))}" alt="">` : `<span class="ph">${I.pen}</span>`}<span><b>${esc(penTitle(p))}</b><small>${p.status === 'repair' ? '⚠ needs repair · ' : ''}${ci ? `<i class="dot" style="background:${esc(inkColor(ci))}"></i>${esc(ci.name)}` : 'empty'}</small></span></button>`;
     }).join('')}</div>`;
     $$('[data-p]', el).forEach(b => b.onclick = () => { st.penId = b.dataset.p; drawPens(); upd(); });
     hydrate(el);
@@ -537,7 +549,7 @@ function filterInks() {
     if (f.acquired?.length && !f.acquired.includes(i.acquired || '—')) return false;
     if (f.shop?.length && !f.shop.includes(i.shop)) return false;
     if (q) {
-      const hay = norm(`${i.brand} ${i.collection} ${i.name} ${i.colourGroup} ${i.notes} ${PROPS.filter(([k]) => i[k]).map(p => p[1]).join(' ')} ${i.size}`);
+      const hay = norm(`${i.brand} ${i.collection} ${i.name} ${i.colourGroup} ${i.scent || ''} ${i.notes} ${PROPS.filter(([k]) => i[k]).map(p => p[1]).join(' ')} ${i.size}`);
       if (!q.split(/\s+/).every(w => hay.includes(w))) return false;
     }
     return true;
@@ -556,7 +568,7 @@ function filterInks() {
 }
 function activeCount(f, keys) { return keys.reduce((n, k) => n + (Array.isArray(f[k]) ? f[k].length : f[k] ? 1 : 0), 0); }
 const INK_FKEYS = ['brand', 'collection', 'colour', 'size', 'props', 'status', 'usage', 'photo', 'acquired', 'shop'];
-const PEN_FKEYS = ['brand', 'nibSize', 'nibMaterial', 'material', 'inked', 'status'];
+const PEN_FKEYS = ['brand', 'nibSize', 'nibMaterial', 'material', 'filling', 'inked', 'status'];
 
 function viewInks(m) {
   const f = F.inks;
@@ -687,6 +699,7 @@ function filterSheet(which) {
       h += group('Nib size', 'nibSize', opts(cnt(p => p.nibSize)));
       h += group('Nib material', 'nibMaterial', opts(cnt(p => p.nibMaterial)));
       h += group('Pen material', 'material', opts(cnt(p => p.material)));
+      { const c = {}; pens.forEach(p => fillingArr(p).forEach(v => c[v] = (c[v] || 0) + 1)); h += group('Filling system', 'filling', opts(c)); }
       h += group('Ink', 'inked', [['yes', 'Inked now'], ['no', 'Empty']], false);
       h += group('Status', 'status', PEN_STATUS.map(([k, n]) => [k, n]));
     }
@@ -725,7 +738,7 @@ function showInk(id) {
         <dl class="facts">
           <div><dt>Type</dt><dd>${i.size === 'sample' ? 'Sample' : 'Bottle'}${i.ml ? ` · ${esc(i.ml)} ml` : ''}${i.qty > 1 ? ` · ×${esc(i.qty)}` : ''}</dd></div>
           <div><dt>Colour group</dt><dd>${i.colourGroup ? `<i class="dot" style="background:${COLOUR_HEX[i.colourGroup]}"></i>${esc(i.colourGroup)}` : '<span class="muted">Not set</span>'}${i.hex ? ` <span class="hex"><i class="dot" style="background:${esc(i.hex)}"></i>${esc(i.hex)}</span>` : ''}</dd></div>
-          <div><dt>Properties</dt><dd>${props.length ? props.map(([, n]) => `<i class="tag">${esc(n)}</i>`).join(' ') : '<span class="muted">None</span>'}</dd></div>
+          <div><dt>Properties</dt><dd>${props.length ? props.map(([k, n]) => `<i class="tag">${esc(n)}${k === 'scented' && i.scent ? ': ' + esc(i.scent) : ''}</i>`).join(' ') : '<span class="muted">None</span>'}</dd></div>
           <div><dt>Status</dt><dd>${esc(STATUS.find(s => s[0] === (i.status || 'owned'))?.[1])}${i.status === 'empty' && i.finishedAt ? ` on ${esc(fmtDate(i.finishedAt))}` : ''}${i.finished?.length && i.status !== 'empty' ? ` <span class="muted">· ${plural(i.finished.length, (i.size === 'sample' ? 'sample' : 'bottle'))} finished before</span>` : ''}</dd></div>
           <div><dt>Used</dt><dd><b>${u.ink[id] || 0}×</b>${u.inkLast[id] ? ` · last ${esc(fmtDate(u.inkLast[id]))}` : ''}</dd></div>
           ${purchaseText(i) ? `<div><dt>Purchase</dt><dd>${esc(purchaseText(i))}</dd></div>` : ''}
@@ -858,6 +871,8 @@ function editInk(ink, { scan = false } = {}) {
       <div class="row2"><label class="lbl">Ink colour (for display)<span class="row"><input type="color" name="hexp" value="${esc(d.hex || COLOUR_HEX[d.colourGroup] || '#888888')}"><input name="hex" value="${esc(d.hex)}" placeholder="from swatch photo" pattern="#[0-9a-fA-F]{6}"></span></label>
         <label class="lbl">Status<select name="status">${STATUS.map(([k, n]) => `<option value="${k}" ${d.status === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label></div>
       <div class="lbl">Properties<div class="chips" id="pr">${PROPS.map(([k, n]) => `<button type="button" class="chip ${d[k] ? 'on' : ''}" data-v="${k}">${n}</button>`).join('')}</div></div>
+      <label class="lbl" id="scentL" ${d.scented ? '' : 'hidden'}>Scent<input name="scent" list="dlScent" value="${esc(d.scent || '')}" placeholder="e.g. chocolate, lavender, rose"></label>
+      <datalist id="dlScent">${[...new Set(live(S.inks).map(i => i.scent).filter(Boolean))].sort(cmp).map(v => `<option value="${esc(v)}">`).join('')}</datalist>
       ${purchaseFields(d, 'ink')}
       <label class="lbl">Notes<textarea name="notes" rows="3">${esc(d.notes)}</textarea></label>
     </form>
@@ -872,7 +887,7 @@ function editInk(ink, { scan = false } = {}) {
   $$('#size button', el).forEach(b => b.onclick = () => { d.size = b.dataset.v; drawSize(); }); drawSize();
   const drawCG = () => $$('#cg .chip', el).forEach(b => b.classList.toggle('on', b.dataset.v === (d.colourGroup || '')));
   $$('#cg .chip', el).forEach(b => b.onclick = () => { d.colourGroup = b.dataset.v; d.colourGuess = false; d.colourAuto = false; drawCG(); $('#sugg', el).textContent = ''; }); drawCG();
-  $$('#pr .chip', el).forEach(b => b.onclick = () => { d[b.dataset.v] = !d[b.dataset.v]; b.classList.toggle('on', d[b.dataset.v]); });
+  $$('#pr .chip', el).forEach(b => b.onclick = () => { d[b.dataset.v] = !d[b.dataset.v]; b.classList.toggle('on', d[b.dataset.v]); if (b.dataset.v === 'scented') { $('#scentL', el).hidden = !d.scented; if (d.scented) form.scent.focus(); } });
   form.hexp.oninput = () => { form.hex.value = form.hexp.value; autoGroup(form.hexp.value); };
   form.hex.oninput = () => { if (/^#[0-9a-f]{6}$/i.test(form.hex.value)) { form.hexp.value = form.hex.value; autoGroup(form.hex.value); } };
   // pick the colour group from the swatch automatically, unless you chose one yourself
@@ -942,6 +957,7 @@ function editInk(ink, { scan = false } = {}) {
       hex: /^#[0-9a-f]{6}$/i.test(fd.get('hex')) ? fd.get('hex').toLowerCase() : '', status: fd.get('status'), notes: fd.get('notes').trim(),
     });
     readPurchase(d, fd, el);
+    d.scent = d.scented ? String(fd.get('scent') || '').trim() : '';
     if (ink && d.colourGroup !== ink.colourGroup && !d.colourAuto) d.colourGuess = false;
     if (d.status === 'empty' && ink?.status !== 'empty') { d.finishedAt = today(); d.finished = [...(d.finished || []), today()]; }
     if (d.status !== 'empty') d.finishedAt = null;
@@ -967,13 +983,14 @@ function filterPens() {
     if (f.nibSize.length && !f.nibSize.includes(p.nibSize)) return false;
     if (f.nibMaterial.length && !f.nibMaterial.includes(p.nibMaterial)) return false;
     if (f.material.length && !f.material.includes(p.material)) return false;
+    if (f.filling?.length && !f.filling.some(v => fillingArr(p).includes(v))) return false;
     if (f.status.length && !f.status.includes(p.status || 'owned')) return false;
     const inked = !!currentFill(p.id);
     if (f.inked === 'yes' && !inked) return false;
     if (f.inked === 'no' && inked) return false;
     if (q) {
       const ci = currentFill(p.id); const ink = ci && byId(S.inks, ci.inkId);
-      const hay = norm(`${p.brand} ${p.model} ${p.nibSize} ${p.nibMaterial} ${p.material} ${p.finish} ${p.filling} ${p.notes} ${ink ? inkTitle(ink) : ''}`);
+      const hay = norm(`${p.brand} ${p.model} ${p.nibSize} ${p.nibMaterial} ${p.material} ${p.finish} ${fillingArr(p).join(' ')} ${p.borrowedBy || ''} ${p.repairNote || ''} ${p.notes} ${ink ? inkTitle(ink) : ''}`);
       if (!q.split(/\s+/).every(w => hay.includes(w))) return false;
     }
     return true;
@@ -1021,9 +1038,9 @@ function renderPens() {
   res.innerHTML = `<div class="pens">${list.map(p => {
     const cf = currentFill(p.id), ci = cf && byId(S.inks, cf.inkId);
     return `<button class="pen-card" data-open="${esc(p.id)}">
-      <span class="pc-img">${p.photos?.pen ? `<img data-img="${esc(p.photos.pen)}" alt="">` : `<span class="ph">${I.pen}</span>`}</span>
+      <span class="pc-img">${penPhoto(p) ? `<img data-img="${esc(penPhoto(p))}" alt="">` : `<span class="ph">${I.pen}</span>`}</span>
       <span class="pc-b"><b>${esc(penTitle(p))}</b><small>${esc([p.nibSize && p.nibSize + ' nib', p.nibMaterial, p.material].filter(Boolean).join(' · '))}</small>
-      <span class="pc-ink">${ci ? `<i class="dot" style="background:${esc(inkColor(ci))}"></i>${esc(ci.name)}` : '<span class="muted">Empty</span>'}${u.pen[p.id] ? `<span class="muted"> · ${u.pen[p.id]} fills</span>` : ''}</span></span></button>`;
+      ${p.status && p.status !== 'owned' ? `<span class="pen-badge ${esc(p.status)}">${esc(penStatusText(p))}</span>` : ''}<span class="pc-ink">${ci ? `<i class="dot" style="background:${esc(inkColor(ci))}"></i>${esc(ci.name)}` : '<span class="muted">Empty</span>'}${u.pen[p.id] ? `<span class="muted"> · ${u.pen[p.id]} fills</span>` : ''}</span></span></button>`;
   }).join('')}</div>`;
   $$('[data-open]', res).forEach(b => b.onclick = () => showPen(b.dataset.open));
   hydrate(res);
@@ -1041,15 +1058,16 @@ function showPen(id) {
       <div class="mh"><div><h2>${esc(penTitle(p))}</h2><p class="sub">${esc([p.nibSize && p.nibSize + ' nib', p.nibMaterial].filter(Boolean).join(' · '))}</p></div><button class="icon-btn" data-close aria-label="Close">${I.x}</button></div>
       <div class="mb detail">
         <div class="photos">
-          ${ph.pen ? `<button class="ph-main pen" data-lb="${esc(ph.pen)}"><img data-img="${esc(ph.pen)}" alt="Pen"></button>` : ''}
-          ${ph.writing ? `<button class="ph-wr" data-lb="${esc(ph.writing)}"><img data-img="${esc(ph.writing)}" alt="Writing sample"></button>` : ''}
+          ${(ph.closed || ph.pen) && ph.posted ? `<div class="pen-ph2">${[['closed', ph.closed || ph.pen, 'Closed'], ['posted', ph.posted, 'Posted']].map(([k, v, n]) => `<button class="ph-main pen" data-lb="${esc(v)}"><img data-img="${esc(v)}" alt="${n}"><span class="slot-l">${n}</span></button>`).join('')}</div>`
+            : (ph.closed || ph.pen || ph.posted) ? `<button class="ph-main pen" data-lb="${esc(ph.closed || ph.pen || ph.posted)}"><img data-img="${esc(ph.closed || ph.pen || ph.posted)}" alt="Pen"></button>` : ''}
+          ${p.status && p.status !== 'owned' ? `<p class="pen-st ${esc(p.status)}">${I.warn}<span>${esc(penStatusText(p))}</span>${RO ? '' : p.status === 'borrowed' ? '<button class="btn small" id="pBack">Returned</button>' : p.status === 'repair' ? '<button class="btn small" id="pFixed">Repaired</button>' : p.status === 'lost' ? '<button class="btn small" id="pFound">Found it</button>' : ''}</p>` : ''}
         </div>
         <div class="now" style="--ink:${esc(ci ? inkColor(ci) : 'transparent')}">
           ${ci ? `<button class="now-ink" data-ink="${esc(ci.id)}"><span class="dot xl" style="background:${esc(inkColor(ci))}">${ci.photos?.swatch ? `<img data-img="${esc(ci.photos.swatch)}" alt="">` : ''}</span><span><small>Inked with</small><b>${esc(ci.name)}</b><small>${esc(ci.brand)} · since ${esc(fmtDate(cf.start))} (${daysSince(cf.start)} d)</small></span></button>` : '<p class="muted">Empty — not inked right now.</p>'}
           ${RO ? '' : `<div class="row wrap">${ci ? `<button class="btn small" id="pRefill">${I.refill}Refill</button><button class="btn small" id="pChange">Change ink</button><button class="btn small ghost" id="pClean">${I.clean}Clean</button>` : `<button class="btn small primary" id="pFill">${I.refill}Ink this pen</button>`}</div>`}
         </div>
         <dl class="facts">
-          ${[['Brand', p.brand], ['Model', p.model], ['Nib size', p.nibSize], ['Nib material', p.nibMaterial], ['Pen material', p.material], ['Finish / colour', p.finish], ['Filling system', p.filling], ['Care', p.careful ? 'Vintage / handle with care' : ''], ['Purchase', purchaseText(p)], ['Status', PEN_STATUS.find(s => s[0] === (p.status || 'owned'))?.[1]], ['Fills', hist.length]].filter(x => x[1] !== '' && x[1] != null).map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join('')}
+          ${[['Brand', p.brand], ['Model', p.model], ['Nib size', p.nibSize], ['Nib material', p.nibMaterial], ['Pen material', p.material], ['Finish / colour', p.finish], ['Filling system', fillingArr(p).join(', ')], ['Care', p.careful ? 'Vintage / handle with care' : ''], ['Purchase', purchaseText(p)], ['Status', penStatusText(p)], ['Lent before', (p.lendHistory || []).map(l => `${l.to} (${fmtDate(l.from)} – ${fmtDate(l.back)})`).join('; ')], ['Fills', hist.length]].filter(x => x[1] !== '' && x[1] != null).map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join('')}
         </dl>
         ${p.notes ? `<p class="notes">${esc(p.notes)}</p>` : ''}
         ${hist.length ? `<h3 class="h3">Inks used in this pen</h3><div class="chips-row">${Object.entries(inkCounts).sort((a, b) => b[1] - a[1]).map(([i, n]) => { const ink = byId(S.inks, i); return `<button class="pill" data-ink="${esc(i)}"><i class="dot" style="background:${esc(inkColor(ink))}"></i>${esc(ink?.name || 'Unknown')} <b>${n}×</b></button>`; }).join('')}</div>
@@ -1066,6 +1084,10 @@ function showPen(id) {
     $('#pChange', el) && ($('#pChange', el).onclick = () => inkAPen({ penId: id }));
     $('#pFill', el) && ($('#pFill', el).onclick = () => inkAPen({ penId: id }));
     $('#ePen', el) && ($('#ePen', el).onclick = () => editPen(byId(S.pens, id)));
+    const backHome = async msg => { const q = JSON.parse(JSON.stringify(byId(S.pens, id))); if (q.status === 'borrowed') q.lendHistory = [...(q.lendHistory || []), { to: q.borrowedBy || 'someone', from: q.borrowedAt || '', back: today() }]; q.status = 'owned'; q.borrowedBy = ''; q.borrowedAt = ''; q.repairNote = ''; q.lostAt = ''; await saveRec('pen', q); toast(msg); };
+    $('#pBack', el) && ($('#pBack', el).onclick = () => backHome(`${penTitle(p)} is back with you`));
+    $('#pFixed', el) && ($('#pFixed', el).onclick = () => backHome(`${penTitle(p)} marked as repaired`));
+    $('#pFound', el) && ($('#pFound', el).onclick = () => backHome(`${penTitle(p)} found`));
     hydrate(el);
   };
   const m = openModal('', { refresh: mm => render(mm), wide: true });
@@ -1074,8 +1096,11 @@ function showPen(id) {
 
 function editPen(pen) {
   const isNew = !pen;
-  const d = pen ? JSON.parse(JSON.stringify(pen)) : { id: uid('p'), brand: '', model: '', nibSize: '', nibMaterial: '', material: '', finish: '', filling: '', status: 'owned', notes: '', photos: {} };
+  const d = pen ? JSON.parse(JSON.stringify(pen)) : { id: uid('p'), brand: '', model: '', nibSize: '', nibMaterial: '', material: '', finish: '', filling: [], status: 'owned', notes: '', photos: {} };
   d.photos ||= {};
+  if (d.photos.pen && !d.photos.closed) { d.photos.closed = d.photos.pen; delete d.photos.pen; } // older photos become the 'closed' photo
+  d.filling = fillingArr(d);
+  const fillOpts = [...new Set([...FILLING, ...live(S.pens).flatMap(fillingArr), ...d.filling])];
   const pending = {};
   const uniq = (k, base) => [...new Set([...base, ...live(S.pens).map(p => p[k]).filter(Boolean)])].sort(cmp);
   const dl = (id, arr) => `<datalist id="${id}">${arr.map(v => `<option value="${esc(v)}">`).join('')}</datalist>`;
@@ -1084,33 +1109,50 @@ function editPen(pen) {
     <form class="mb form" id="penF" autocomplete="off">
       <div class="ph-edit"><div class="ph-slots two" id="slots"></div></div>
       <div class="row2"><label class="lbl">Brand<input name="brand" list="dlPB" required value="${esc(d.brand)}"></label><label class="lbl">Model<input name="model" value="${esc(d.model)}" placeholder="e.g. Custom 74"></label></div>
-      <div class="lbl">Nib size<div class="chips" id="ns">${uniq('nibSize', NIB_SIZES).map(v => `<button type="button" class="chip" data-v="${esc(v)}">${esc(v)}</button>`).join('')}</div><input name="nibSize" value="${esc(d.nibSize)}" placeholder="or type another…"></div>
+      <div class="lbl">Nib size<div class="chips" id="ns">${[...new Set([...NIB_SIZES, ...live(S.pens).map(p => p.nibSize).filter(Boolean)])].map(v => `<button type="button" class="chip" data-v="${esc(v)}">${esc(v)}</button>`).join('')}<button type="button" class="chip" id="nsCustom">${I.edit}Custom…</button></div><input name="nibSize" value="${esc(d.nibSize)}" placeholder="Custom size, e.g. SF, SM, FA, Zoom" id="nsIn"></div>
       <div class="row2"><label class="lbl">Nib material<input name="nibMaterial" list="dlNM" value="${esc(d.nibMaterial)}"></label><label class="lbl">Pen material<input name="material" list="dlPM" value="${esc(d.material)}"></label></div>
-      <div class="row2"><label class="lbl">Finish / colour<input name="finish" value="${esc(d.finish)}"></label><label class="lbl">Filling system<input name="filling" list="dlFS" value="${esc(d.filling)}"></label></div>
-      <label class="lbl">Status<select name="status">${PEN_STATUS.map(([k, n]) => `<option value="${k}" ${d.status === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      <div class="row2"><label class="lbl">Finish / colour<input name="finish" value="${esc(d.finish)}"></label><span></span></div>
+      <div class="lbl">Filling system <span class="muted">(choose all that apply)</span><div class="chips" id="fs"></div><div class="row"><input id="fsIn" placeholder="Other filling system…"><button type="button" class="btn small" id="fsAdd">Add</button></div></div>
+      <div class="lbl">Status<div class="chips" id="pst">${PEN_STATUS.map(([k, n]) => `<button type="button" class="chip" data-v="${k}">${n}</button>`).join('')}</div></div>
+      <div class="row2 st-extra" data-for="borrowed"><label class="lbl">Who has it<input name="borrowedBy" list="dlWho" value="${esc(d.borrowedBy || '')}" placeholder="Name"></label><label class="lbl">Since<input type="date" name="borrowedAt" value="${esc(d.borrowedAt || today())}"></label></div>
+      <label class="lbl st-extra" data-for="repair">What needs fixing<input name="repairNote" value="${esc(d.repairNote || '')}" placeholder="e.g. cracked cap, piston stuck, nib alignment"></label>
+      <label class="lbl st-extra" data-for="lost">Lost since<input type="date" name="lostAt" value="${esc(d.lostAt || today())}"></label>
+      <datalist id="dlWho">${[...new Set(live(S.pens).flatMap(p => [p.borrowedBy, ...(p.lendHistory || []).map(l => l.to)]).filter(Boolean))].map(v => `<option value="${esc(v)}">`).join('')}</datalist>
       <label class="switch"><input type="checkbox" name="careful" ${d.careful ? 'checked' : ''}><span>Vintage / handle with care <small class="muted">— warns before shimmer or iron gall inks</small></span></label>
       ${purchaseFields(d, 'pen')}
       <label class="lbl">Notes<textarea name="notes" rows="3">${esc(d.notes)}</textarea></label>
-      ${dl('dlPB', uniq('brand', []))}${dl('dlNM', uniq('nibMaterial', NIB_MATERIALS))}${dl('dlPM', uniq('material', PEN_MATERIALS))}${dl('dlFS', uniq('filling', FILLING))}
+      ${dl('dlPB', uniq('brand', []))}${dl('dlNM', uniq('nibMaterial', NIB_MATERIALS))}${dl('dlPM', uniq('material', PEN_MATERIALS))}
     </form>
     <div class="mf">${isNew ? '<span></span>' : `<button class="btn danger ghost" id="del">Delete</button>`}<button class="btn primary" id="save">Save</button></div>`, {
     wide: true, onClose: () => Object.values(pending).forEach(p => URL.revokeObjectURL(p.url)),
   });
   const el = m.el, form = $('#penF', el);
   bindPurchase(el, d);
-  const drawNS = () => $$('#ns .chip', el).forEach(b => b.classList.toggle('on', b.dataset.v === form.nibSize.value));
-  $$('#ns .chip', el).forEach(b => b.onclick = () => { form.nibSize.value = form.nibSize.value === b.dataset.v ? '' : b.dataset.v; drawNS(); });
+  const drawNS = () => $$('#ns .chip[data-v]', el).forEach(b => b.classList.toggle('on', b.dataset.v === form.nibSize.value));
+  $$('#ns .chip[data-v]', el).forEach(b => b.onclick = () => { form.nibSize.value = form.nibSize.value === b.dataset.v ? '' : b.dataset.v; drawNS(); });
+  $('#nsCustom', el).onclick = () => { form.nibSize.value = ''; drawNS(); $('#nsIn', el).focus(); };
   form.nibSize.oninput = drawNS; drawNS();
+  // filling systems: several can apply (e.g. cartridge + converter)
+  const drawFS = () => {
+    $('#fs', el).innerHTML = fillOpts.map(v => `<button type="button" class="chip ${d.filling.includes(v) ? 'on' : ''}" data-v="${esc(v)}">${esc(v)}</button>`).join('');
+    $$('#fs .chip', el).forEach(b => b.onclick = () => { const v = b.dataset.v; d.filling = d.filling.includes(v) ? d.filling.filter(x => x !== v) : [...d.filling, v]; drawFS(); });
+  };
+  const addFS = () => { const v = $('#fsIn', el).value.trim(); if (!v) return; if (!fillOpts.includes(v)) fillOpts.push(v); if (!d.filling.includes(v)) d.filling.push(v); $('#fsIn', el).value = ''; drawFS(); };
+  $('#fsAdd', el).onclick = addFS; $('#fsIn', el).onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addFS(); } };
+  drawFS();
+  const drawST = () => { $$('#pst .chip', el).forEach(b => b.classList.toggle('on', b.dataset.v === (d.status || 'owned'))); $$('.st-extra', el).forEach(x => x.hidden = x.dataset.for !== d.status); };
+  $$('#pst .chip', el).forEach(b => b.onclick = () => { d.status = b.dataset.v; drawST(); });
+  drawST();
   function drawSlots() {
     const slot = (k, label) => {
       const src = pending[k]?.url, has = src || d.photos[k];
       return `<div class="slot ${k}"><span class="slot-l">${label}</span>${has ? `<img ${src ? `src="${src}"` : `data-img="${esc(d.photos[k])}"`} alt="">` : `<span class="slot-e">${I.camera}</span>`}<span class="slot-btns">${CAN_CAMERA ? `<button type="button" class="slot-btn" data-add="${k}" data-src="camera" aria-label="Take photo">${I.camera}</button>` : ''}<button type="button" class="slot-btn" data-add="${k}" data-src="gallery" aria-label="${CAN_CAMERA ? 'From gallery' : 'Choose image'}">${I.image}${CAN_CAMERA ? '' : (has ? 'Replace' : 'Choose image')}</button></span>${has ? `<button type="button" class="icon-btn sm rm" data-rm="${k}" aria-label="Remove ${label}">${I.x}</button>` : ''}</div>`;
     };
-    $('#slots', el).innerHTML = slot('pen', 'Pen') + slot('writing', 'Writing sample');
+    $('#slots', el).innerHTML = slot('closed', 'Closed') + slot('posted', 'Posted');
     $$('[data-rm]', el).forEach(b => b.onclick = () => { const k = b.dataset.rm; if (pending[k]) { URL.revokeObjectURL(pending[k].url); delete pending[k]; } else d.photos[k] = null; drawSlots(); });
     $$('[data-add]', el).forEach(b => b.onclick = async () => {
       const k = b.dataset.add; const file = await pickFile(b.dataset.src); if (!file) return;
-      const r = await openEditor({ file, mode: 'photo', title: k === 'pen' ? 'Pen photo' : 'Writing sample' });
+      const r = await openEditor({ file, mode: 'photo', title: k === 'closed' ? 'Pen closed' : 'Pen posted' });
       if (!r) return;
       if (pending[k]) URL.revokeObjectURL(pending[k].url);
       pending[k] = { blob: r.image, url: URL.createObjectURL(r.image) }; drawSlots();
@@ -1121,7 +1163,12 @@ function editPen(pen) {
   $('#save', el).onclick = async () => {
     if (!form.reportValidity()) return;
     const fd = new FormData(form);
-    for (const k of ['brand', 'model', 'nibSize', 'nibMaterial', 'material', 'finish', 'filling', 'status', 'notes']) d[k] = String(fd.get(k) || '').trim();
+    for (const k of ['brand', 'model', 'nibSize', 'nibMaterial', 'material', 'finish', 'notes']) d[k] = String(fd.get(k) || '').trim();
+    const wasBorrowed = pen?.status === 'borrowed';
+    if (d.status === 'borrowed') { d.borrowedBy = String(fd.get('borrowedBy') || '').trim(); d.borrowedAt = fd.get('borrowedAt') || today(); }
+    else { if (wasBorrowed) d.lendHistory = [...(d.lendHistory || []), { to: pen.borrowedBy || 'someone', from: pen.borrowedAt || '', back: today() }]; d.borrowedBy = ''; d.borrowedAt = ''; }
+    d.repairNote = d.status === 'repair' ? String(fd.get('repairNote') || '').trim() : '';
+    d.lostAt = d.status === 'lost' ? (fd.get('lostAt') || today()) : '';
     d.careful = !!fd.get('careful');
     readPurchase(d, fd, el);
     for (const [k, p] of Object.entries(pending)) { trashImage(pen?.photos?.[k]); d.photos[k] = await storeImage(p.blob); }
@@ -1438,7 +1485,7 @@ function viewSettings(m) {
       <p class="muted">The backup file has all data but not the photos (those are in your Google Drive folder).</p>
     </section>
     <section class="card"><h2 class="h2">Install</h2><p class="muted">On Android: Chrome menu ⋮ → <b>Add to Home screen / Install app</b>. On Windows: the install icon at the right of the Chrome or Edge address bar.</p>${S.installEvt ? '<button class="btn primary" id="install">Install now</button>' : ''}</section>
-    <p class="muted center small">Fountain Pens and Inks · v1.6</p>`;
+    <p class="muted center small">Fountain Pens and Inks · v1.7</p>`;
   $('#titleSave', m).onclick = async () => { S.title = $('#title', m).value.trim() || 'Fountain Pens and Inks'; S.titleUpdatedAt = Date.now(); await db.setMeta('title', { title: S.title, at: S.titleUpdatedAt }); changed(); toast('Saved'); };
   $('#syncNow', m) && ($('#syncNow', m).onclick = () => sync(true));
   $('#signOut', m) && ($('#signOut', m).onclick = () => { drive.signOut(); S.syncState = 'signin'; updateSyncBadge(); renderView(); });
@@ -1504,11 +1551,11 @@ async function exportExcel() {
       'Colour group': i.colourGroup, Colour: i.hex, Sheen: yn(i.sheen), Shimmer: yn(i.shimmer), 'Duo-chrome': yn(i.duochrome), 'Iron gall': yn(i.ironGall), Scented: yn(i.scented),
       Status: STATUS.find(s => s[0] === (i.status || 'owned'))?.[1], 'Times used': u.ink[i.id] || 0, 'Last used': u.inkLast[i.id] || '',
       'In pen now': (u.inkPens[i.id] || []).map(p => penTitle(byId(S.pens, p))).join(', '),
-      Acquired: ACQ.find(a => a[0] === i.acquired)?.[1] || '', 'Purchase date': i.purchaseDate || '', Shop: i.shop || '', Price: i.price ?? '', Notes: i.notes,
+      Scent: i.scent || '', Acquired: ACQ.find(a => a[0] === i.acquired)?.[1] || '', 'Purchase date': i.purchaseDate || '', Shop: i.shop || '', Price: i.price ?? '', Notes: i.notes,
     }));
     const pens = live(S.pens).sort((a, b) => cmp(penTitle(a), penTitle(b))).map(p => {
       const cf = currentFill(p.id);
-      return { Brand: p.brand, Model: p.model, 'Nib size': p.nibSize, 'Nib material': p.nibMaterial, 'Pen material': p.material, Finish: p.finish, 'Filling system': p.filling, Status: PEN_STATUS.find(s => s[0] === (p.status || 'owned'))?.[1], 'Current ink': cf ? inkTitle(byId(S.inks, cf.inkId)) : '', Fills: u.pen[p.id] || 0, Careful: p.careful ? 'Yes' : '', Acquired: ACQ.find(a => a[0] === p.acquired)?.[1] || '', 'Purchase date': p.purchaseDate || '', Shop: p.shop || '', Price: p.price ?? '', Notes: p.notes };
+      return { Brand: p.brand, Model: p.model, 'Nib size': p.nibSize, 'Nib material': p.nibMaterial, 'Pen material': p.material, Finish: p.finish, 'Filling system': fillingArr(p).join(', '), Status: penStatusText(p), 'Current ink': cf ? inkTitle(byId(S.inks, cf.inkId)) : '', Fills: u.pen[p.id] || 0, Careful: p.careful ? 'Yes' : '', Acquired: ACQ.find(a => a[0] === p.acquired)?.[1] || '', 'Purchase date': p.purchaseDate || '', Shop: p.shop || '', Price: p.price ?? '', Notes: p.notes };
     });
     const fills = live(S.fills).sort((a, b) => cmp(b.start, a.start)).map(f => ({ Pen: penTitle(byId(S.pens, f.penId)), Ink: inkTitle(byId(S.inks, f.inkId)), Filled: f.start, Ended: f.end || '', 'Ended by': f.endReason || (f.end ? '' : 'in pen now'), Note: f.note || '' }));
     const wb = XLSX.utils.book_new();
