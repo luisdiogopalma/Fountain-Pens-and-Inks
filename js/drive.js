@@ -109,6 +109,9 @@ export async function makePublic(id) {
 export async function makePrivate(id) {
   try { await api(`${API}/files/${id}/permissions/anyoneWithLink`, { method: 'DELETE' }); } catch (e) { /* already private */ }
 }
+export async function rename(id, name) {
+  await api(`${API}/files/${id}?fields=id`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+}
 export async function trash(id) {
   try { await api(`${API}/files/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) }); } catch (e) {}
 }

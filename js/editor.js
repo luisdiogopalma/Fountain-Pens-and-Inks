@@ -10,7 +10,7 @@
 export const DEFAULT_LAYOUT = {
   aspect: 0.6306, // width / height of the card
   swatch: [0.085, 0.065, 0.815, 0.59], // right edge kept inside the ink, which tends to bleed on that side
-  writing: [0.03, 0.73, 0.94, 0.15], // runs down to just above the printed brand name
+  writing: [0.012, 0.73, 0.976, 0.15], // full width (handwriting can start right at the edge), down to just above the brand name
 };
 
 const MAX_SRC = 3000;      // working resolution of the original photo
@@ -256,6 +256,7 @@ export function detectCard(canvas, layout = null) {
   candidates.sort((a, b) => b.score - a.score);
   if (!candidates.length) return null;
   let best = candidates[0].q;
+  let contrastOf = null;
   if (layout && layout.swatch) {
     // The swatch is usually the strongest rectangle in the photo. Test both readings for each
     // top candidate — "this is the card" and "this is the swatch on the card" — and keep the one
@@ -283,7 +284,15 @@ export function detectCard(canvas, layout = null) {
       marginPts.push([sx / 2, sy + sh * t], [sx + sw + (1 - sx - sw) / 2, sy + sh * t], [sx + sw * t, sy / 2]);
       for (let j = 0; j <= 10; j++) swPts.push([sx + sw * (0.2 + 0.6 * t), sy + sh * (0.2 + 0.6 * j / 10)]);
     }
-    const contrast = cardH => { const m = sample(cardH, marginPts), q = sample(cardH, swPts); if (!m || !q) return -1; return Math.max(-1, Math.min(1, ((m[0] - q[0]) + (q[1] - m[1])) / 80)); };
+    // every margin sample must look like paper compared with the swatch (a quad whose "margin" runs through ink fails)
+    const samplesOf = (Hm, pts) => mapPts(Hm, pts).map(([x, y]) => { const xi = Math.round(x), yi = Math.round(y); if (xi < 0 || yi < 0 || xi >= w || yi >= h) return null; const i = yi * w + xi, r = ch[0][i], g = ch[1][i], b = ch[2][i]; return [(r + g + b) / 3, Math.max(r, g, b) - Math.min(r, g, b)]; });
+    const contrast = cardH => {
+      const q = sample(cardH, swPts); if (!q) return -1;
+      const ms = samplesOf(cardH, marginPts); if (ms.filter(Boolean).length < ms.length * 0.7) return -1;
+      const paper = ms.filter(v => v && (v[0] - q[0]) + (q[1] - v[1]) > 25).length / ms.length;
+      return paper * 2 - 1;
+    };
+    contrastOf = q => contrast(homography([[0, 0], [1, 0], [1, 1], [0, 1]], q));
     const sum = a => a.reduce((x, y) => x + y, 0);
     let bestH = -Infinity;
     for (const c of candidates.slice(0, 30)) {
@@ -301,8 +310,9 @@ export function detectCard(canvas, layout = null) {
     }
   }
   // snap each side onto the nearby edge (least-squares line through the strongest edge points)
-  const refine = q => {
+  const refine = (q, nearest) => {
     const lines = [];
+    const qcx = q.reduce((a, p) => a + p[0], 0) / 4, qcy = q.reduce((a, p) => a + p[1], 0) / 4;
     for (let i = 0; i < 4; i++) {
       const P = q[i], Q = q[(i + 1) % 4];
       const L = Math.hypot(Q[0] - P[0], Q[1] - P[1]); const nx = -(Q[1] - P[1]) / L, ny = (Q[0] - P[0]) / L;
@@ -310,13 +320,27 @@ export function detectCard(canvas, layout = null) {
       const n = Math.max(10, Math.floor(L / 2));
       for (let k = 2; k < n - 1; k++) {
         const t = k / n, x = P[0] + (Q[0] - P[0]) * t, y = P[1] + (Q[1] - P[1]) * t;
-        let bm = 0, bp = null;
-        for (let o = -8; o <= 8; o++) {
-          const xx = Math.round(x + nx * o), yy = Math.round(y + ny * o);
-          if (xx < 1 || yy < 1 || xx >= w - 1 || yy >= h - 1) continue;
-          const m = mag[yy * w + xx]; if (m > bm) { bm = m; bp = [xx, yy]; }
+        let bp = null;
+        if (nearest) {
+          // nearest clear edge peak; may move outward up to 6px but inward only 3px,
+          // so a faint card edge is never swapped for the strong swatch edge just inside it
+          let bd = 99;
+          const out = ((x - qcx) * nx + (y - qcy) * ny) > 0 ? 1 : -1;
+          const magAt = o => { const xx = Math.round(x + nx * o * out), yy = Math.round(y + ny * o * out); return (xx < 1 || yy < 1 || xx >= w - 1 || yy >= h - 1) ? -1 : mag[yy * w + xx]; };
+          for (let o = -3; o <= 6; o++) {
+            const m = magAt(o);
+            if (m > tSupport * 0.8 && m >= magAt(o - 1) && m >= magAt(o + 1) && Math.abs(o) < bd) { bd = Math.abs(o); bp = [Math.round(x + nx * o * out), Math.round(y + ny * o * out)]; }
+          }
+        } else {
+          let bm = 0;
+          for (let o = -8; o <= 8; o++) {
+            const xx = Math.round(x + nx * o), yy = Math.round(y + ny * o);
+            if (xx < 1 || yy < 1 || xx >= w - 1 || yy >= h - 1) continue;
+            const m = mag[yy * w + xx]; if (m > bm) { bm = m; bp = [xx, yy]; }
+          }
+          if (bm <= tSupport * 0.6) bp = null;
         }
-        if (bp && bm > tSupport * 0.6) pts.push(bp);
+        if (bp) pts.push(bp);
       }
       if (pts.length < n * 0.35) { lines.push(null); continue; }
       // total least squares, then one pass dropping outliers
@@ -340,7 +364,18 @@ export function detectCard(canvas, layout = null) {
       return Math.hypot(r[0] - p[0], r[1] - p[1]) < Math.min(w, h) * 0.08 ? r : p;
     });
   };
-  best = refine(refine(best));
+  // try both refinements (and none) and keep whichever outline is best supported
+  const judge = q => {
+    if (!quadAnglesOk(orderCorners(q))) return -9;
+    // precise: average edge strength exactly on each side (rewards sitting right on the edge)
+    const onLine = (P, Q) => { const L = Math.hypot(Q[0] - P[0], Q[1] - P[1]), n = Math.max(8, Math.floor(L)); let s = 0, c = 0; for (let k = 2; k < n - 1; k++) { const xx = Math.round(P[0] + (Q[0] - P[0]) * k / n), yy = Math.round(P[1] + (Q[1] - P[1]) * k / n); if (xx < 1 || yy < 1 || xx >= w - 1 || yy >= h - 1) continue; s += Math.min(mag[yy * w + xx], tStrong * 2); c++; } return c ? s / c / tStrong : 0; };
+    const sides = [0, 1, 2, 3].map(i => Math.min(1.5, onLine(q[i], q[(i + 1) % 4])) / 1.5);
+    let sc = sides.reduce((a, b) => a + b, 0) / 4;
+    if (layout && layout.swatch && typeof contrastOf === 'function') sc = 0.6 * sc + 0.4 * contrastOf(q);
+    return sc;
+  };
+  const opts = [best, refine(refine(best, false), false), refine(refine(best, true), true)];
+  best = opts.map(q => [q, judge(q)]).sort((a, b) => b[1] - a[1])[0][0];
   const k = canvas.width / w;
   return best.map(p => [Math.max(0, Math.min(canvas.width, p[0] * k)), Math.max(0, Math.min(canvas.height, p[1] * k))]);
 }
@@ -405,11 +440,23 @@ export function sampleColor(canvas, x, y, r = 6) {
   const w = Math.min(canvas.width - x0, r * 2 + 1), h = Math.min(canvas.height - y0, r * 2 + 1);
   if (w <= 0 || h <= 0) return [255, 255, 255];
   const d = g.getImageData(x0, y0, w, h).data;
-  let R = 0, G = 0, B = 0, n = 0;
-  for (let i = 0; i < d.length; i += 4) { R += d[i]; G += d[i + 1]; B += d[i + 2]; n++; }
-  return [R / n, G / n, B / n];
+  const rs = [], gs = [], bs = [];
+  for (let i = 0; i < d.length; i += 4) { rs.push(d[i]); gs.push(d[i + 1]); bs.push(d[i + 2]); }
+  const med = a => { a.sort((x, y) => x - y); return a[a.length >> 1]; };
+  return [med(rs), med(gs), med(bs)]; // median: ignores shimmer sparkles and dust
 }
-export function findWhite(canvas, exclude = []) {
+function inPoly(pt, poly) {
+  let c = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if (((yi > pt[1]) !== (yj > pt[1])) && (pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi)) c = !c;
+  }
+  return c;
+}
+// excludeQuad: normalised corners of an area to skip (e.g. the card, when the white should come from the lightbox around it)
+export function findWhite(canvas, exclude = [], excludeQuad = null) {
+  let eq = null;
+  if (excludeQuad) { const cx = excludeQuad.reduce((a, p) => a + p[0], 0) / 4, cy = excludeQuad.reduce((a, p) => a + p[1], 0) / 4; eq = excludeQuad.map(([x, y]) => [cx + (x - cx) * 1.12, cy + (y - cy) * 1.12]); }
   const k = Math.min(1, 400 / Math.max(canvas.width, canvas.height));
   const c = scaledCanvas(canvas, 400);
   const w = c.width, h = c.height;
@@ -420,6 +467,7 @@ export function findWhite(canvas, exclude = []) {
     for (let bx = B; bx + B < w - B; bx += Math.max(2, B >> 1)) {
       const cxn = (bx + B / 2) / w, cyn = (by + B / 2) / h;
       if (cxn < 0.05 || cxn > 0.95 || cyn < 0.04 || cyn > 0.96) continue;
+      if (eq && inPoly([cxn, cyn], eq)) continue;
       if (exclude.some(r => cxn > r[0] - 0.02 && cxn < r[0] + r[2] + 0.02 && cyn > r[1] - 0.02 && cyn < r[1] + r[3] + 0.02)) continue;
       let s = 0, s2 = 0, chroma = 0, clip = 0, n = 0;
       for (let y = by; y < by + B; y += 2) for (let x = bx; x < bx + B; x += 2) {
@@ -431,10 +479,10 @@ export function findWhite(canvas, exclude = []) {
       }
       const m = s / n, sd = Math.sqrt(Math.max(0, s2 / n - m * m));
       const score = m - 1.5 * (chroma / n) - 4 * sd - (clip / n > 0.3 ? 80 : 0);
-      if (score > bestS) { bestS = score; best = [(bx + B / 2) / k, (by + B / 2) / k]; }
+      if (score > bestS) { bestS = score; best = [(bx + B / 2) / k, (by + B / 2) / k]; best.L = m; }
     }
   }
-  return best || [canvas.width / 2, canvas.height / 2];
+  return best || Object.assign([canvas.width / 2, canvas.height / 2], { L: 0 });
 }
 export function applyGains(src, gains) {
   const out = canvasOf(src.width, src.height);
@@ -449,9 +497,12 @@ export function applyGains(src, gains) {
   g.putImageData(id, 0, 0);
   return out;
 }
+// Make the reference neutral. A bright reference (paper, lightbox) is also lifted to near-white;
+// a darker one (a grey wall) is only neutralised, so the photo isn't over-brightened.
 function gainsFor(rgb) {
-  const target = 245;
-  return rgb.map(v => Math.max(0.5, Math.min(3, target / Math.max(20, v))));
+  const L = (rgb[0] + rgb[1] + rgb[2]) / 3;
+  const target = L > 170 ? 245 : L;
+  return rgb.map(v => Math.max(0.4, Math.min(3, target / Math.max(15, v))));
 }
 export function cropNorm(canvas, r) {
   const x = Math.round(r[0] * canvas.width), y = Math.round(r[1] * canvas.height);
@@ -476,10 +527,93 @@ export function dominantHex(canvas) {
   return '#' + [med(rs), med(gs), med(bs)].map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
 }
 
+// ---------- colour adjustments ----------
+export const HUE_BANDS = [['red', 'Reds', 0, '#d33'], ['orange', 'Oranges', 30, '#e8862a'], ['yellow', 'Yellows', 60, '#e0c22a'], ['green', 'Greens', 120, '#3a9a3a'], ['aqua', 'Aquas', 180, '#1fb0b0'], ['blue', 'Blues', 225, '#3366d6'], ['purple', 'Purples', 270, '#8a4ad0'], ['magenta', 'Magentas', 315, '#d03aa0']];
+export const ADJ_DEFAULT = { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, temp: 0, tint: 0, vibrance: 0, saturation: 0, texture: 0, bands: {} };
+export const adjIsDefault = a => !a || (Object.keys(ADJ_DEFAULT).every(k => k === 'bands' || !a[k]) && Object.values(a.bands || {}).every(v => !v || v.every(x => !x)));
+const S2L = new Float32Array(256); for (let i = 0; i < 256; i++) { const v = i / 255; S2L[i] = v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }
+const L2S = v => { v = v <= 0 ? 0 : v >= 1 ? 1 : v; return v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055; };
+const L2S_LUT = new Float32Array(4097); for (let i = 0; i <= 4096; i++) L2S_LUT[i] = L2S(i / 4096);
+const l2s = v => L2S_LUT[v <= 0 ? 0 : v >= 1 ? 4096 : (v * 4096) | 0];
+// weight of each hue band for a given hue (triangular, overlapping neighbours)
+function bandWeights(h) {
+  const w = new Float32Array(8);
+  for (let i = 0; i < 8; i++) {
+    const c = HUE_BANDS[i][2], prev = HUE_BANDS[(i + 7) % 8][2], next = HUE_BANDS[(i + 1) % 8][2];
+    let d = h - c; if (d > 180) d -= 360; if (d < -180) d += 360;
+    let span = d >= 0 ? next - c : c - prev; if (span <= 0) span += 360;
+    w[i] = Math.max(0, 1 - Math.abs(d) / span);
+  }
+  return w;
+}
+// One pass: white-balance gains, then light, colour, hue ranges, then texture.
+export function applyAll(srcCanvas, gains = [1, 1, 1], a = ADJ_DEFAULT) {
+  a = { ...ADJ_DEFAULT, ...(a || {}) };
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const id = srcCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h);
+  const d = id.data;
+  const exp = 2 ** a.exposure;
+  const rM = exp * (1 + a.temp * 0.003), gM = exp * (1 - a.tint * 0.003), bM = exp * (1 - a.temp * 0.003);
+  const bp = -a.blacks / 100 * 0.12, wp = 1 - a.whites / 100 * 0.12;
+  const con = 1 + a.contrast / 100, sh = a.shadows / 100 * 0.3, hi = a.highlights / 100 * 0.3;
+  const bands = HUE_BANDS.map(([k]) => (a.bands || {})[k] || [0, 0, 0]);
+  const anyBand = bands.some(b => b[0] || b[1] || b[2]);
+  const doColour = anyBand || a.saturation || a.vibrance;
+  const sat = 1 + a.saturation / 100, vib = a.vibrance / 100;
+  const lut = new Uint8ClampedArray(256 * 3); // per-channel gain LUT (sRGB gains, as the white point is measured in sRGB)
+  for (let i = 0; i < 256; i++) for (let c = 0; c < 3; c++) lut[c * 256 + i] = Math.min(255, Math.round(i * gains[c]));
+  for (let p = 0; p < d.length; p += 4) {
+    // gains (sRGB) -> linear -> exposure/temperature/tint -> back to sRGB
+    let r = l2s(S2L[lut[d[p]]] * rM), g = l2s(S2L[lut[256 + d[p + 1]]] * gM), b = l2s(S2L[lut[512 + d[p + 2]]] * bM);
+    // tone on luminance, colour ratio preserved
+    const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let nL = (L - bp) / (wp - bp);
+    nL += sh * (1 - nL) * (1 - nL) * (nL < 0.5 ? 1 : 2 * (1 - nL)) + hi * nL * nL * (nL > 0.5 ? 1 : 2 * nL);
+    nL = 0.5 + (nL - 0.5) * con;
+    if (nL < 0) nL = 0; else if (nL > 1) nL = 1;
+    if (L > 0.0005) { const k = nL / L; r *= k; g *= k; b *= k; } else { r = g = b = nL; }
+    if (doColour) {
+      // RGB -> HSL
+      const M = Math.min(Math.max(r, g, b), 1), m = Math.max(Math.min(r, g, b), 0); let H = 0, Sx = 0; const Lx = (M + m) / 2; const dd = M - m;
+      if (dd > 1e-5) { Sx = dd / (1 - Math.abs(2 * Lx - 1) || 1e-5); H = M === r ? ((g - b) / dd) % 6 : M === g ? (b - r) / dd + 2 : (r - g) / dd + 4; H = (H * 60 + 360) % 360; }
+      let S = Sx, Lh = Lx;
+      if (anyBand && Sx > 0.02) {
+        const wts = bandWeights(H); let dh = 0, ds = 0, dl = 0;
+        for (let i = 0; i < 8; i++) if (wts[i]) { dh += wts[i] * bands[i][0]; ds += wts[i] * bands[i][1]; dl += wts[i] * bands[i][2]; }
+        H = (H + dh * 0.3 + 360) % 360;           // ±30° at ±100
+        S = S * (1 + ds / 100);
+        Lh = Lh + dl / 100 * 0.25 * Math.min(1, Sx * 2); // neutrals stay put
+      }
+      S = S * sat; S = S + vib * (1 - S) * S * 1.2;
+      if (S < 0) S = 0; else if (S > 1) S = 1; if (Lh < 0) Lh = 0; else if (Lh > 1) Lh = 1;
+      // HSL -> RGB
+      const C = (1 - Math.abs(2 * Lh - 1)) * S, X = C * (1 - Math.abs((H / 60) % 2 - 1)), mm = Lh - C / 2;
+      const seg = (H / 60) | 0;
+      const [r1, g1, b1] = seg === 0 ? [C, X, 0] : seg === 1 ? [X, C, 0] : seg === 2 ? [0, C, X] : seg === 3 ? [0, X, C] : seg === 4 ? [X, 0, C] : [C, 0, X];
+      r = r1 + mm; g = g1 + mm; b = b1 + mm;
+    }
+    d[p] = r * 255; d[p + 1] = g * 255; d[p + 2] = b * 255;
+  }
+  // texture: gentle unsharp mask — makes shimmer particles and paper texture crisper
+  if (a.texture) {
+    const amt = a.texture / 100 * 1.4, o = new Uint8ClampedArray(d);
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const p = (y * w + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const q = p + c;
+        const blur = (o[q - 4] + o[q + 4] + o[q - w * 4] + o[q + w * 4] + o[q] * 4) / 8;
+        d[q] = o[q] + amt * (o[q] - blur);
+      }
+    }
+  }
+  const out = canvasOf(w, h); out.getContext('2d').putImageData(id, 0, 0);
+  return out;
+}
+
 // ---------- UI ----------
 const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 
-export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title = 'Edit photo', recrop = false }) {
+export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title = 'Edit photo', recrop = false, adjust = null }) {
   // recrop: the file is an already straightened, colour-corrected card — go straight to the boxes
   return new Promise(async resolve => {
     const root = el('div', 'ed');
@@ -522,6 +656,16 @@ export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title
     const fullQuad = () => { const m = 0.03; const w = src.width, h = src.height; return [[w * m, h * m], [w * (1 - m), h * m], [w * (1 - m), h * (1 - m)], [w * m, h * (1 - m)]]; };
     if (!quad) quad = fullQuad();
     let step = 1, warped = null, preview = null, white = null, wbOn = !recrop, onResize = () => {};
+    let adj = JSON.parse(JSON.stringify({ ...ADJ_DEFAULT, ...(adjust || {}) })); adj.bands ||= {};
+    // White reference: the lightbox/background outside the card (truest white), or the card paper.
+    let whiteSrc = 'card', whiteBg = [0.5, 0.05], bgOver = false;
+    if (!recrop) {
+      const qn = quad.map(([x, y]) => [x / src.width, y / src.height]);
+      const wp = findWhite(src, [], mode === 'card' && detected ? qn : null);
+      whiteBg = [wp[0] / src.width, wp[1] / src.height];
+      if (wp.L > 120) whiteSrc = 'bg';
+    }
+    const srcSample = () => sampleColor(src, whiteBg[0] * src.width, whiteBg[1] * src.height, Math.max(5, Math.round(src.width / 150)));
 
     // fit a canvas into the stage
     function fit(c) {
@@ -549,16 +693,25 @@ export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title
       show(view);
       const s = view.width / src.width;
       let geo = fit(view);
-      ov.innerHTML = '<svg class="ed-svg"><polygon/></svg>' + [0, 1, 2, 3].map(i => `<div class="ed-h" data-i="${i}"></div>`).join('');
+      ov.innerHTML = '<svg class="ed-svg"><polygon/></svg>' + [0, 1, 2, 3].map(i => `<div class="ed-h" data-i="${i}"></div>`).join('') + (recrop ? '' : `<div class="ed-wb ${whiteSrc === 'bg' ? '' : 'off'}" title="White reference"></div>`);
+      if (!recrop) $('.ed-hint').innerHTML += ` The <b>target</b> marks the white used to correct colour${whiteSrc === 'bg' ? ' — found on the background around the card' : ''}; drag it anywhere on white.`;
       const poly = ov.querySelector('polygon'), svg = ov.querySelector('svg');
       function draw() {
         svg.setAttribute('width', geo.dw); svg.setAttribute('height', geo.dh);
         const pts = quad.map(p => [p[0] * s * geo.k, p[1] * s * geo.k]);
         poly.setAttribute('points', pts.map(p => p.join(',')).join(' '));
         ov.querySelectorAll('.ed-h').forEach((h, i) => { h.style.left = pts[i][0] + 'px'; h.style.top = pts[i][1] + 'px'; });
+        const t = ov.querySelector('.ed-wb'); if (t) { t.style.left = whiteBg[0] * geo.dw + 'px'; t.style.top = whiteBg[1] * geo.dh + 'px'; }
       }
       onResize = () => { geo = fit(view); draw(); };
       draw();
+      const tgt = ov.querySelector('.ed-wb');
+      if (tgt) tgt.onpointerdown = e => {
+        e.preventDefault(); e.stopPropagation(); tgt.setPointerCapture(e.pointerId);
+        const r = wrap.getBoundingClientRect();
+        tgt.onpointermove = ev => { whiteBg = [Math.max(0, Math.min(1, (ev.clientX - r.left) / geo.dw)), Math.max(0, Math.min(1, (ev.clientY - r.top) / geo.dh))]; whiteSrc = 'bg'; tgt.classList.remove('off'); draw(); };
+        tgt.onpointerup = tgt.onpointercancel = () => { tgt.onpointermove = null; };
+      };
       ov.querySelectorAll('.ed-h').forEach(h => {
         h.onpointerdown = e => {
           e.preventDefault(); h.setPointerCapture(e.pointerId);
@@ -605,36 +758,120 @@ export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title
       const wp = findWhite(warped, ex);
       white = [wp[0] / warped.width, wp[1] / warped.height];
     }
+    function whiteSample() {
+      return whiteSrc === 'bg' ? srcSample() : sampleColor(warped, white[0] * warped.width, white[1] * warped.height, Math.max(4, Math.round(warped.width / 120)));
+    }
     function currentGains() {
       if (!wbOn) return [1, 1, 1];
-      return gainsFor(sampleColor(warped, white[0] * warped.width, white[1] * warped.height, Math.max(4, Math.round(warped.width / 120))));
+      const smp = whiteSample(); bgOver = smp.every(v => v >= 250);
+      return gainsFor(smp);
     }
     function step2() {
       step = 2;
       $('.ed-step').textContent = 'Step 2 of 2 · colour' + (mode === 'card' ? ' & areas' : '');
       $('.ed-next').textContent = 'Save';
-      $('.ed-hint').innerHTML = mode === 'card'
-        ? 'The <b>target</b> marks white paper used to correct colour — drag it to move it. Drag the <b>Swatch</b> and <b>Writing</b> boxes (corner dots resize).'
-        : 'The <b>target</b> marks something white used to correct colour — drag it, or turn correction off.';
       const acts = $('.ed-actions'); acts.innerHTML = '';
+      const hint = () => {
+        const parts = [];
+        if (mode === 'card') parts.push('Drag the <b>Swatch</b> and <b>Writing</b> boxes (corner dots resize).');
+        if (wbOn && !recrop) parts.push(whiteSrc === 'bg' ? 'White is taken from the <b>background</b> (go back to move the target), or tap the photo to use a white spot on it instead.' : 'White is taken from the <b>target</b> on the photo — drag it, or tap a white spot.');
+        if (wbOn && bgOver && whiteSrc === 'bg') parts.push('<span class="ed-warn">The background is overexposed (pure white), so it can\'t correct colour. Lower the camera exposure a little, or use the card paper.</span>');
+        $('.ed-hint').innerHTML = parts.join(' ');
+      };
+      hint2 = hint;
       const bBack = el('button', 'btn small', '← Corners'); bBack.type = 'button'; bBack.onclick = () => step1();
       const bRot = el('button', 'btn small', 'Rotate ↻'); bRot.type = 'button';
       bRot.onclick = () => { quad = [quad[3], quad[0], quad[1], quad[2]]; busy(true); setTimeout(() => { buildWarp(); render(); busy(false); }, 20); };
-      const wb = el('label', 'chk', `<input type="checkbox" ${wbOn ? 'checked' : ''}> Colour correction`);
+      const wb = el('label', 'chk', `<input type="checkbox" ${wbOn ? 'checked' : ''}> White balance`);
       wb.querySelector('input').onchange = e => { wbOn = e.target.checked; render(); };
-      acts.append(bBack, bRot, wb);
+      const ws = el('div', 'seg ed-ws', `<button type="button" data-w="bg">White: background</button><button type="button" data-w="card">${mode === 'card' ? 'Card paper' : 'Spot on photo'}</button>`);
+      ws.querySelectorAll('button').forEach(b => b.onclick = () => { whiteSrc = b.dataset.w; render(); });
+      const bAdj = el('button', 'btn small ed-adjbtn', '🎨 Adjust colour'); bAdj.type = 'button';
+      bAdj.onclick = () => toggleAdj();
+      if (recrop) acts.append(bAdj); else acts.append(bBack, bRot, wb, ws, bAdj);
       if (mode === 'card') {
         const def = el('label', 'chk', '<input type="checkbox" class="ed-def"> Remember box positions');
         acts.append(def);
       }
+      const ink = el('span', 'ed-ink'); acts.append(ink);
       render();
+      if (!adjIsDefault(adj) && !$('.ed-adj')) {
+        // open on the first tab that has changes
+        tab = Object.values(adj.bands || {}).some(v => v && v.some(x => x)) ? 'hsl' : ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks'].some(k => adj[k]) ? 'light' : adj.texture && !['temp', 'tint', 'vibrance', 'saturation'].some(k => adj[k]) ? 'detail' : 'colour';
+        const fb = HUE_BANDS.find(([k]) => (adj.bands?.[k] || []).some(x => x)); if (fb) band = fb[0];
+        toggleAdj(true);
+      }
     }
-    function render() {
-      const p = applyGains(preview, currentGains());
+    let hint2 = () => {};
+    // ----- colour adjustment panel -----
+    const SL = {
+      light: [['exposure', 'Exposure', -2, 2, 0.05, v => (v > 0 ? '+' : '') + v.toFixed(2) + ' EV'], ['contrast', 'Contrast', -100, 100, 1], ['highlights', 'Highlights', -100, 100, 1], ['shadows', 'Shadows', -100, 100, 1], ['whites', 'Whites', -100, 100, 1], ['blacks', 'Blacks', -100, 100, 1]],
+      colour: [['temp', 'Temperature', -100, 100, 1, v => v ? (v < 0 ? 'cooler ' : 'warmer ') + Math.abs(v) : '0', 'linear-gradient(90deg,#4a7bd8,#ddd,#e0a030)'], ['tint', 'Tint', -100, 100, 1, v => v ? (v < 0 ? 'greener ' : 'more magenta ') + Math.abs(v) : '0', 'linear-gradient(90deg,#3aa04a,#ddd,#c040b0)'], ['vibrance', 'Vibrance', -100, 100, 1], ['saturation', 'Saturation', -100, 100, 1]],
+      detail: [['texture', 'Texture (shimmer & paper)', 0, 100, 1]],
+    };
+    let tab = 'colour', band = 'aqua', imgTimer = null;
+    function sliderHTML([k, name, min, max, step, fmt, bg], val, attrs = '') {
+      const f = fmt || (v => (v > 0 ? '+' : '') + v);
+      return `<div class="sl"><label><span>${name}</span><b data-reset="${k}" title="Tap to reset">${f(val)}</b></label><input type="range" min="${min}" max="${max}" step="${step}" value="${val}" data-k="${k}" ${attrs} ${bg ? `style="--track:${bg}"` : ''}></div>`;
+    }
+    function drawAdj() {
+      const p = $('.ed-adj'); if (!p) return;
+      $$('.adj-tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
+      const body = $('.adj-body');
+      if (tab === 'hsl') {
+        const bv = adj.bands[band] || [0, 0, 0];
+        const bd = HUE_BANDS.find(x => x[0] === band), c = bd[2];
+        const hue = o => `hsl(${(c + o + 360) % 360} 75% 50%)`;
+        body.innerHTML = `<div class="bands">${HUE_BANDS.map(([k, n, , col]) => `<button type="button" class="band ${k === band ? 'on' : ''} ${(adj.bands[k] || []).some(x => x) ? 'mod' : ''}" data-b="${k}" style="--c:${col}" title="${n}"><i></i><span>${n}</span></button>`).join('')}</div>
+          ${sliderHTML(['bh', 'Hue', -100, 100, 1, v => v ? `${v < 0 ? '← ' : ''}${Math.round(Math.abs(v) * 0.3)}°${v > 0 ? ' →' : ''}` : '0', `linear-gradient(90deg,${hue(-30)},${hue(0)},${hue(30)})`], bv[0])}
+          ${sliderHTML(['bs', 'Saturation', -100, 100, 1, null, `linear-gradient(90deg,#999,${hue(0)})`], bv[1])}
+          ${sliderHTML(['bl', 'Luminance', -100, 100, 1, null, `linear-gradient(90deg,#222,${hue(0)},#fff)`], bv[2])}
+          <p class="adj-tip">Changes only the <b>${bd[1].toLowerCase()}</b> in the photo. E.g. a turquoise that looks too blue: <i>Aquas/Blues → Hue ←</i> (towards green). Weak red sheen: <i>Reds/Magentas → Saturation +</i>.</p>`;
+        $$('.band', body).forEach(b => b.onclick = () => { band = b.dataset.b; drawAdj(); });
+      } else {
+        body.innerHTML = SL[tab].map(d => sliderHTML(d, adj[d[0]])).join('') + (tab === 'detail' ? '<p class="adj-tip">Texture sharpens fine detail — shimmer particles and paper grain stand out more. Keep it low to avoid noise.</p>' : tab === 'colour' ? '<p class="adj-tip">Fine-tune after the white balance: Temperature moves blue ↔ amber, Tint green ↔ magenta. Vibrance boosts muted colours more than strong ones.</p>' : '');
+      }
+      $$('input[type=range]', body).forEach(inp => inp.oninput = () => {
+        const k = inp.dataset.k, v = +inp.value;
+        if (k === 'bh' || k === 'bs' || k === 'bl') { const arr = (adj.bands[band] ||= [0, 0, 0]); arr['bh bs bl'.split(' ').indexOf(k)] = v; $(`.band[data-b="${band}"]`)?.classList.toggle('mod', arr.some(x => x)); }
+        else adj[k] = v;
+        const lab = inp.parentElement.querySelector('b'); const def = (tab === 'hsl' ? null : SL[tab].find(d => d[0] === k));
+        lab.textContent = tab === 'hsl' ? (k === 'bh' ? (v ? `${v < 0 ? '← ' : ''}${Math.round(Math.abs(v) * 0.3)}°${v > 0 ? ' →' : ''}` : '0') : (v > 0 ? '+' : '') + v) : (def[5] || (x => (x > 0 ? '+' : '') + x))(v);
+        scheduleImage();
+      });
+      $$('[data-reset]', body).forEach(b => b.onclick = () => { const k = b.dataset.reset; if (k[0] === 'b' && k.length === 2) { (adj.bands[band] ||= [0, 0, 0])['bh bs bl'.split(' ').indexOf(k)] = 0; } else adj[k] = 0; drawAdj(); scheduleImage(); });
+    }
+    function toggleAdj(force) {
+      let p = $('.ed-adj');
+      if (p && !force) { p.remove(); root.classList.remove('adj-open'); return; }
+      if (p) return;
+      p = el('div', 'ed-adj', `<div class="adj-tabs">${[['light', 'Light'], ['colour', 'Colour'], ['hsl', 'Hue ranges'], ['detail', 'Detail']].map(([k, n]) => `<button type="button" data-t="${k}">${n}</button>`).join('')}</div>
+        <div class="adj-body"></div>
+        <div class="adj-foot"><button type="button" class="btn small" id="adjHold">Hold to see original</button><button type="button" class="btn small ghost" id="adjReset">Reset all</button><label class="chk"><input type="checkbox" class="ed-adjdef"> Use as default for new photos</label></div>`);
+      $('.ed-bar').appendChild(p); root.classList.add('adj-open');
+      $$('.adj-tabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; drawAdj(); });
+      $('#adjReset').onclick = () => { adj = JSON.parse(JSON.stringify(ADJ_DEFAULT)); adj.bands = {}; drawAdj(); scheduleImage(); };
+      const hold = $('#adjHold');
+      hold.onpointerdown = e => { e.preventDefault(); show(preview); };
+      hold.onpointerup = hold.onpointerleave = hold.onpointercancel = () => scheduleImage();
+      drawAdj();
+    }
+    const $$ = s => [...root.querySelectorAll(s)];
+    function renderImage() {
+      const p = applyAll(preview, currentGains(), adj);
       show(p);
+      const ink = $('.ed-ink');
+      if (ink && mode === 'card') { const hx = dominantHex(cropNorm(p, L.swatch)); ink.innerHTML = `<i style="background:${hx}"></i>Ink colour ${hx}`; }
+      hint2();
+      return p;
+    }
+    function scheduleImage() { if (imgTimer) return; imgTimer = requestAnimationFrame(() => { imgTimer = null; renderImage(); }); }
+    function render() {
+      const p = renderImage();
       let geo = fit(p);
       const boxes = mode === 'card' ? [['swatch', 'Swatch'], ['writing', 'Writing']] : [];
-      ov.innerHTML = boxes.map(([k, n]) => `<div class="ed-box" data-k="${k}"><span>${n}</span><i class="tl"></i><i class="br"></i></div>`).join('') + `<div class="ed-wb" title="White reference"></div>`;
+      ov.innerHTML = boxes.map(([k, n]) => `<div class="ed-box" data-k="${k}"><span>${n}</span><i class="tl"></i><i class="br"></i></div>`).join('') + `<div class="ed-wb" title="White reference" ${whiteSrc === 'card' && wbOn && !recrop ? '' : 'hidden'}></div>`;
+      root.querySelectorAll('.ed-ws button').forEach(b => b.classList.toggle('on', b.dataset.w === whiteSrc));
       const place = () => {
         ov.querySelectorAll('.ed-box').forEach(b => {
           const r = L[b.dataset.k];
@@ -671,9 +908,9 @@ export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title
       drag(m, (dx, dy) => { white = [Math.max(0, Math.min(1, wbase[0] + dx)), Math.max(0, Math.min(1, wbase[1] + dy))]; place(); }, () => render());
       // tap on empty area moves the white target
       ov.onpointerdown = e => {
-        if (e.target !== ov) return;
+        if (e.target !== ov || recrop || !wbOn) return;
         const r = wrap.getBoundingClientRect();
-        white = [(e.clientX - r.left) / geo.dw, (e.clientY - r.top) / geo.dh];
+        white = [(e.clientX - r.left) / geo.dw, (e.clientY - r.top) / geo.dh]; whiteSrc = 'card';
         render();
       };
     }
@@ -687,10 +924,16 @@ export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title
       }
       busy(true);
       await new Promise(r => setTimeout(r, 20));
-      const final = applyGains(warped, currentGains());
+      const gains = currentGains();
+      const final = applyAll(warped, gains, adj);
+      const edited = !adjIsDefault(adj);
+      const raw = edited ? applyGains(warped, gains) : null; // white-balanced but unedited — kept so colours can be re-edited later
+      const common = { adjust: edited ? JSON.parse(JSON.stringify(adj)) : null, saveDefault: !!root.querySelector('.ed-adjdef')?.checked };
       if (mode === 'card') {
         const sw = cropNorm(final, L.swatch), wr = cropNorm(final, L.writing);
         const out = {
+          ...common,
+          cardRaw: raw ? await toBlob(scaledCanvas(raw, 1400), 0.92) : null,
           card: await toBlob(scaledCanvas(final, 1400)),
           swatch: await toBlob(scaledCanvas(sw, 700)),
           writing: await toBlob(scaledCanvas(wr, 1400)),
@@ -699,11 +942,77 @@ export function openEditor({ file, mode = 'card', layout = DEFAULT_LAYOUT, title
         };
         close(out);
       } else {
-        close({ image: await toBlob(scaledCanvas(final, 1600)), hex: dominantHex(final) });
+        close({ ...common, image: await toBlob(scaledCanvas(final, 1600)), imageRaw: raw ? await toBlob(scaledCanvas(raw, 1600), 0.92) : null, hex: dominantHex(final) });
       }
     };
     window.addEventListener('resize', resizeH);
+    if ('ResizeObserver' in window) new ResizeObserver(() => onResize()).observe(stage);
     busy(false);
     if (recrop) { buildWarp(); step2(); } else step1();
   });
+}
+
+// ---------- batch: process a photo without the editor UI ----------
+// mode 'card': find card, white from the lightbox (or card paper), straighten, colour-adjust, crop swatch + writing.
+// mode 'photo': white from the background, colour-adjust, crop to the object on the white background.
+export async function autoProcess(file, { mode = 'card', layout = DEFAULT_LAYOUT, adjust = null } = {}) {
+  const img = await loadImage(file);
+  const src = scaledCanvas(img, MAX_SRC);
+  const adj = { ...ADJ_DEFAULT, ...(adjust || {}) };
+  const edited = !adjIsDefault(adj);
+  if (mode === 'card') {
+    const L = layout || DEFAULT_LAYOUT;
+    let quad = null; try { quad = detectCard(src, L); } catch (e) { console.warn(e); }
+    const found = !!quad;
+    if (!quad) { const w = src.width, h = src.height; quad = [[w * .03, h * .03], [w * .97, h * .03], [w * .97, h * .97], [w * .03, h * .97]]; }
+    let q = quad;
+    const mw = (dist(q[0], q[1]) + dist(q[3], q[2])) / 2, mh = (dist(q[0], q[3]) + dist(q[1], q[2])) / 2;
+    if ((L.aspect < 1) !== (mw < mh)) q = [q[3], q[0], q[1], q[2]];
+    let ow = (dist(q[0], q[1]) + dist(q[3], q[2])) / 2, oh = (dist(q[0], q[3]) + dist(q[1], q[2])) / 2;
+    const area = ow * oh; oh = Math.sqrt(area / L.aspect); ow = oh * L.aspect;
+    const k = Math.min(1, MAX_OUT / Math.max(ow, oh));
+    const warped = warp(src, q, Math.max(10, Math.round(ow * k)), Math.max(10, Math.round(oh * k)));
+    // white: lightbox around the card if bright enough, else the card paper
+    const wp = findWhite(src, [], found ? q.map(([x, y]) => [x / src.width, y / src.height]) : null);
+    let smp, whiteFrom;
+    if (wp.L > 120) { smp = sampleColor(src, wp[0], wp[1], Math.max(5, Math.round(src.width / 150))); whiteFrom = 'background'; }
+    else { const cp = findWhite(warped, [L.swatch, L.writing]); smp = sampleColor(warped, cp[0], cp[1], Math.max(4, Math.round(warped.width / 120))); whiteFrom = 'card'; }
+    const gains = gainsFor(smp);
+    const final = applyAll(warped, gains, adj);
+    const sw = cropNorm(final, L.swatch), wr = cropNorm(final, L.writing);
+    return {
+      found, whiteFrom, overexposed: smp.every(v => v >= 250), adjust: edited ? adj : null,
+      card: await toBlob(scaledCanvas(final, 1400)),
+      cardRaw: edited ? await toBlob(scaledCanvas(applyGains(warped, gains), 1400), 0.92) : null,
+      swatch: await toBlob(scaledCanvas(sw, 700)),
+      writing: await toBlob(scaledCanvas(wr, 1400)),
+      writingCanvas: wr, hex: dominantHex(sw),
+    };
+  }
+  // photo (pens)
+  const wp = findWhite(src);
+  const gains = wp.L > 120 ? gainsFor(sampleColor(src, wp[0], wp[1], Math.max(5, Math.round(src.width / 150)))) : [1, 1, 1];
+  const bal = applyGains(src, gains);
+  // crop to whatever isn't background
+  const small = scaledCanvas(bal, 400), sw = small.width, sh = small.height;
+  const d = small.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, sw, sh).data;
+  const bgL = 0.9 * 245; let x0 = sw, y0 = sh, x1 = -1, y1 = -1;
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+    const p = (y * sw + x) * 4, r = d[p], g = d[p + 1], b = d[p + 2];
+    const lum = (r + g + b) / 3, chroma = Math.max(r, g, b) - Math.min(r, g, b);
+    if (lum < bgL - 25 || chroma > 40) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  let cropped = bal;
+  if (x1 > x0 && y1 > y0 && wp.L > 120) {
+    const k2 = bal.width / sw, mx = (x1 - x0) * 0.08 + 6, my = (y1 - y0) * 0.08 + 6;
+    const cx0 = Math.max(0, (x0 - mx) * k2), cy0 = Math.max(0, (y0 - my) * k2), cx1 = Math.min(bal.width, (x1 + mx) * k2), cy1 = Math.min(bal.height, (y1 + my) * k2);
+    if ((cx1 - cx0) * (cy1 - cy0) > bal.width * bal.height * 0.03) { cropped = canvasOf(Math.round(cx1 - cx0), Math.round(cy1 - cy0)); cropped.getContext('2d').drawImage(bal, cx0, cy0, cx1 - cx0, cy1 - cy0, 0, 0, cropped.width, cropped.height); }
+  }
+  const final = applyAll(cropped, [1, 1, 1], adj);
+  return {
+    found: true, adjust: edited ? adj : null,
+    image: await toBlob(scaledCanvas(final, 1600)),
+    imageRaw: edited ? await toBlob(scaledCanvas(cropped, 1600), 0.92) : null,
+    hex: dominantHex(final),
+  };
 }

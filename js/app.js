@@ -1,6 +1,6 @@
 import { db } from './db.js';
 import * as drive from './drive.js';
-import { openEditor, DEFAULT_LAYOUT, cropNorm, dominantHex } from './editor.js';
+import { openEditor, DEFAULT_LAYOUT, cropNorm, dominantHex, autoProcess } from './editor.js';
 
 // ───────────────────────── constants ─────────────────────────
 const CFG = window.INK_CONFIG || {};
@@ -242,20 +242,30 @@ async function sync(interactive) {
       remoteStr = stableJSON(remote);
       if (await mergeCatalog(remote)) rerender();
     }
-    // upload new photos
-    const refs = new Set();
-    for (const r of [...live(S.inks), ...live(S.pens)]) for (const v of Object.values(r.photos || {})) if (v) refs.add(v);
+    // upload new photos, named after their ink or pen ("Diamine - Sepia - Swatch.jpg")
+    const refs = new Map(); // image id -> file name
+    for (const r of live(S.inks)) for (const [k, v] of Object.entries(r.photos || {})) if (v) refs.set(v, photoName('ink', r, k));
+    for (const r of live(S.pens)) for (const [k, v] of Object.entries(r.photos || {})) if (v) refs.set(v, photoName('pen', r, k));
+    const names = (await db.meta('imageNames', {})) || {};
     let n = 0;
-    for (const id of refs) {
-      if (S.imageMap[id]) continue;
+    for (const [id, name] of refs) {
+      if (S.imageMap[id]) {
+        // already in Drive: rename if the ink/pen name changed (or it still has an old id-style name)
+        if (names[id] !== name) {
+          S.syncMsg = 'Naming photos…'; updateSyncBadge();
+          try { await drive.rename(S.imageMap[id], name); names[id] = name; } catch (e) { if (e.code === 'auth') throw e; console.warn('rename', e); }
+        }
+        continue;
+      }
       const img = await db.get('images', id);
       if (!img) continue;
       S.syncMsg = `Uploading photos… ${++n}`; updateSyncBadge();
-      const r = await drive.upload({ name: id + '.jpg', parent: photosId, mime: 'image/jpeg', body: img.blob });
-      S.imageMap[id] = r.id;
+      const r = await drive.upload({ name, parent: photosId, mime: 'image/jpeg', body: img.blob });
+      S.imageMap[id] = r.id; names[id] = name;
       if (m.public) await drive.makePublic(r.id);
       await db.setMeta('imageMap', S.imageMap);
     }
+    await db.setMeta('imageNames', names);
     S.syncMsg = '';
     // trash replaced photos
     if (m.trash?.length) {
@@ -295,6 +305,19 @@ async function sync(interactive) {
   }
 }
 
+// Drive file name for a photo: the ink or pen it belongs to, plus which picture it is
+const PHOTO_PART = { card: 'Swatch card (full)', cardRaw: 'Swatch card (unedited)', swatch: 'Swatch', writing: 'Writing sample', closed: 'Closed', closedRaw: 'Closed (unedited)', posted: 'Posted', postedRaw: 'Posted (unedited)', pen: 'Closed' };
+async function saveAdjDefault(r) {
+  if (!r?.saveDefault) return;
+  S.prefs = { ...S.prefs, adjDefault: r.adjust || null }; S.prefsUpdatedAt = Date.now();
+  await db.setMeta('prefs', { prefs: S.prefs, at: S.prefsUpdatedAt });
+  toast(r.adjust ? 'Colour settings saved as default for new photos' : 'Default colour settings cleared');
+}
+function photoName(kind, r, key) {
+  const who = kind === 'ink' ? [r.brand, r.collection, r.name] : [r.brand, r.model];
+  const base = who.filter(Boolean).join(' - ') || (kind === 'ink' ? 'Ink' : 'Pen');
+  return `${base} - ${PHOTO_PART[key] || key}.jpg`.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim();
+}
 function updateSyncBadge() {
   const b = $('#syncBadge'); if (!b) return;
   if (RO) { b.hidden = true; return; }
@@ -854,7 +877,7 @@ function editInk(ink, { scan = false } = {}) {
       <div class="ph-edit">
         <div class="ph-slots" id="slots"></div>
         <div class="scan-row"><span class="lbl-inline">Swatch card</span>${photoBtns('scan')}</div>
-        <div class="row wrap"><button type="button" class="link sm" id="recrop">Adjust boxes</button><button type="button" class="link sm" id="swOnly">Swatch only</button><button type="button" class="link sm" id="wrOnly">Writing sample only</button></div>
+        <div class="row wrap"><button type="button" class="link sm" id="recrop">Adjust boxes &amp; colour</button><button type="button" class="link sm" id="swOnly">Swatch only</button><button type="button" class="link sm" id="wrOnly">Writing sample only</button></div>
       </div>
       <div class="row2">
         <label class="lbl">Brand<input name="brand" list="dlBrand" required value="${esc(d.brand)}"></label>
@@ -912,15 +935,17 @@ function editInk(ink, { scan = false } = {}) {
       return `<div class="slot ${k}"><span class="slot-l">${label}</span>${has ? `<img ${src ? `src="${src}"` : `data-img="${esc(d.photos[k])}"`} alt="">` : '<span class="slot-e">—</span>'}${has ? `<button type="button" class="icon-btn sm rm" data-rm="${k}" aria-label="Remove ${label}">${I.x}</button>` : ''}</div>`;
     };
     $('#slots', el).innerHTML = slot('swatch', 'Swatch') + slot('writing', 'Writing') + slot('card', 'Whole card');
-    $$('[data-rm]', el).forEach(b => b.onclick = () => { const k = b.dataset.rm; if (pending[k]) { URL.revokeObjectURL(pending[k].url); delete pending[k]; } else d.photos[k] = null; drawSlots(); });
+    $$('[data-rm]', el).forEach(b => b.onclick = () => { const k = b.dataset.rm; if (pending[k]) { URL.revokeObjectURL(pending[k].url); delete pending[k]; } else d.photos[k] = null; if (k === 'card') { delete pending.cardRaw; d.photos.cardRaw = null; } drawSlots(); });
     hydrate(el);
   }
   const setPending = (k, blob) => { if (pending[k]) URL.revokeObjectURL(pending[k].url); pending[k] = { blob, url: URL.createObjectURL(blob) }; };
   async function doScan(src) {
     const file = await pickFile(src); if (!file) return;
-    const r = await openEditor({ file, mode: 'card', layout: S.layout, title: 'Swatch card' });
+    const r = await openEditor({ file, mode: 'card', layout: S.layout, title: 'Swatch card', adjust: S.prefs.adjDefault });
     if (!r) return;
     setPending('card', r.card); setPending('swatch', r.swatch); setPending('writing', r.writing);
+    if (r.cardRaw) setPending('cardRaw', r.cardRaw); else { delete pending.cardRaw; d.photos.cardRaw = null; }
+    d.colorAdjust = r.adjust; await saveAdjDefault(r);
     form.hex.value = r.hex; form.hexp.value = r.hex; autoGroup(r.hex);
     if (r.layout) { S.layout = r.layout; S.layoutUpdatedAt = Date.now(); await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); applyLayoutCSS(); toast('Box positions remembered for next cards'); }
     drawSlots();
@@ -934,11 +959,16 @@ function editInk(ink, { scan = false } = {}) {
     drawSlots();
   }
   async function doRecrop() {
-    const blob = pending.card?.blob || await imageBlob(d.photos.card).catch(() => null);
+    // edit from the unedited card when there is one, so colour changes never stack up
+    const rawBlob = pending.cardRaw?.blob || (d.photos.cardRaw ? await imageBlob(d.photos.cardRaw).catch(() => null) : null);
+    const blob = rawBlob || pending.card?.blob || await imageBlob(d.photos.card).catch(() => null);
     if (!blob) { toast('No saved card photo for this ink yet — scan the card first', true); return; }
-    const r = await openEditor({ file: blob, mode: 'card', layout: S.layout, title: 'Adjust boxes', recrop: true });
+    const r = await openEditor({ file: blob, mode: 'card', layout: S.layout, title: 'Boxes & colour', recrop: true, adjust: rawBlob ? d.colorAdjust : null });
     if (!r) return;
     setPending('swatch', r.swatch); setPending('writing', r.writing);
+    if (rawBlob || r.adjust) { setPending('card', r.card); d.colorAdjust = r.adjust; if (!rawBlob) setPending('cardRaw', blob); }
+    if (rawBlob && !r.adjust) { delete pending.cardRaw; d.photos.cardRaw = null; } // colours back to unedited: no copy needed
+    await saveAdjDefault(r);
     form.hex.value = r.hex; form.hexp.value = r.hex; autoGroup(r.hex);
     if (r.layout) { S.layout = { ...r.layout, aspect: S.layout.aspect }; S.layoutUpdatedAt = Date.now(); await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); applyLayoutCSS(); toast('Box positions remembered for next cards'); }
     drawSlots();
@@ -1146,16 +1176,34 @@ function editPen(pen) {
   function drawSlots() {
     const slot = (k, label) => {
       const src = pending[k]?.url, has = src || d.photos[k];
-      return `<div class="slot ${k}"><span class="slot-l">${label}</span>${has ? `<img ${src ? `src="${src}"` : `data-img="${esc(d.photos[k])}"`} alt="">` : `<span class="slot-e">${I.camera}</span>`}<span class="slot-btns">${CAN_CAMERA ? `<button type="button" class="slot-btn" data-add="${k}" data-src="camera" aria-label="Take photo">${I.camera}</button>` : ''}<button type="button" class="slot-btn" data-add="${k}" data-src="gallery" aria-label="${CAN_CAMERA ? 'From gallery' : 'Choose image'}">${I.image}${CAN_CAMERA ? '' : (has ? 'Replace' : 'Choose image')}</button></span>${has ? `<button type="button" class="icon-btn sm rm" data-rm="${k}" aria-label="Remove ${label}">${I.x}</button>` : ''}</div>`;
+      return `<div class="slot ${k}"><span class="slot-l">${label}</span>${has ? `<img ${src ? `src="${src}"` : `data-img="${esc(d.photos[k])}"`} alt="">` : `<span class="slot-e">${I.camera}</span>`}<span class="slot-btns">${has ? `<button type="button" class="slot-btn" data-edit="${k}" aria-label="Adjust colour">🎨</button>` : ''}${CAN_CAMERA ? `<button type="button" class="slot-btn" data-add="${k}" data-src="camera" aria-label="Take photo">${I.camera}</button>` : ''}<button type="button" class="slot-btn" data-add="${k}" data-src="gallery" aria-label="${CAN_CAMERA ? 'From gallery' : 'Choose image'}">${I.image}${CAN_CAMERA ? '' : (has ? 'Replace' : 'Choose image')}</button></span>${has ? `<button type="button" class="icon-btn sm rm" data-rm="${k}" aria-label="Remove ${label}">${I.x}</button>` : ''}</div>`;
     };
     $('#slots', el).innerHTML = slot('closed', 'Closed') + slot('posted', 'Posted');
-    $$('[data-rm]', el).forEach(b => b.onclick = () => { const k = b.dataset.rm; if (pending[k]) { URL.revokeObjectURL(pending[k].url); delete pending[k]; } else d.photos[k] = null; drawSlots(); });
+    $$('[data-rm]', el).forEach(b => b.onclick = () => { const k = b.dataset.rm; if (pending[k]) { URL.revokeObjectURL(pending[k].url); delete pending[k]; } else d.photos[k] = null; delete pending[k + 'Raw']; if (d.photos[k + 'Raw']) d.photos[k + 'Raw'] = null; drawSlots(); });
+    // src: what the editor was opened on — { isRaw, stored } tells whether an unedited copy already exists
+    const takeResult = (k, r, src) => {
+      if (pending[k]) URL.revokeObjectURL(pending[k].url);
+      pending[k] = { blob: r.image, url: URL.createObjectURL(r.image) };
+      if (r.adjust) { if (!(src.isRaw && src.stored)) pending[k + 'Raw'] = { blob: src.isRaw ? src.blob : r.imageRaw, url: '' }; }
+      else { delete pending[k + 'Raw']; d.photos[k + 'Raw'] = null; }
+      d.adjust = { ...(d.adjust || {}), [k]: r.adjust };
+      drawSlots();
+    };
     $$('[data-add]', el).forEach(b => b.onclick = async () => {
       const k = b.dataset.add; const file = await pickFile(b.dataset.src); if (!file) return;
-      const r = await openEditor({ file, mode: 'photo', title: k === 'closed' ? 'Pen closed' : 'Pen posted' });
+      const r = await openEditor({ file, mode: 'photo', title: k === 'closed' ? 'Pen closed' : 'Pen posted', adjust: S.prefs.adjDefault });
       if (!r) return;
-      if (pending[k]) URL.revokeObjectURL(pending[k].url);
-      pending[k] = { blob: r.image, url: URL.createObjectURL(r.image) }; drawSlots();
+      takeResult(k, r, { isRaw: false, stored: false }); await saveAdjDefault(r);
+    });
+    $$('[data-edit]', el).forEach(b => b.onclick = async () => {
+      const k = b.dataset.edit;
+      const pendRaw = pending[k + 'Raw']?.blob;
+      const raw = pendRaw || (d.photos[k + 'Raw'] ? await imageBlob(d.photos[k + 'Raw']).catch(() => null) : null);
+      const blob = raw || pending[k]?.blob || await imageBlob(d.photos[k]).catch(() => null);
+      if (!blob) return;
+      const r = await openEditor({ file: blob, mode: 'photo', title: 'Adjust colour', recrop: true, adjust: raw ? d.adjust?.[k] : null });
+      if (!r) return;
+      takeResult(k, r, { blob, isRaw: !!raw, stored: !!raw && !pendRaw }); await saveAdjDefault(r);
     });
     hydrate(el);
   }
@@ -1440,6 +1488,244 @@ function spendingHTML(inks, scope) {
     ${sRows.length ? `<h3 class="h3">Top shops</h3>${bl(sRows, mx(sRows))}` : ''}`;
 }
 
+
+// ───────────────────────── batch photos ─────────────────────────
+function pickFiles() {
+  return new Promise(res => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = 'image/*'; inp.multiple = true;
+    inp.onchange = () => res([...inp.files]);
+    inp.addEventListener('cancel', () => res([]));
+    inp.click();
+  });
+}
+// On-device handwriting reading (Tesseract, runs in the browser; the ~10 MB language file is downloaded once and cached)
+const TESS = { script: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js', workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js', corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1', langPath: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int' };
+let ocrWorkerP = null;
+function ocrWorker(onStatus) {
+  if (ocrWorkerP) return ocrWorkerP;
+  ocrWorkerP = (async () => {
+    if (!window.Tesseract) await new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = TESS.script; sc.onload = res; sc.onerror = () => rej(new Error('Could not load the text reader — check the internet connection (needed the first time).')); document.head.appendChild(sc); });
+    const w = await Tesseract.createWorker('eng', 1, { workerPath: TESS.workerPath, corePath: TESS.corePath, langPath: TESS.langPath, logger: m => { if (m.status && /load|init/.test(m.status) && onStatus) onStatus(`Preparing text reader… ${Math.round((m.progress || 0) * 100)}%`); } });
+    await w.setParameters({ tessedit_pageseg_mode: '6' });
+    return w;
+  })().catch(e => { ocrWorkerP = null; throw e; });
+  return ocrWorkerP;
+}
+function ocrPrep(c) {
+  // grey, contrast-stretched, enlarged copy of the writing area
+  const k = Math.max(1, Math.min(2.5, 1600 / c.width));
+  const o = document.createElement('canvas'); o.width = Math.round(c.width * k); o.height = Math.round(c.height * k);
+  const g = o.getContext('2d', { willReadFrequently: true }); g.imageSmoothingQuality = 'high'; g.drawImage(c, 0, 0, o.width, o.height);
+  const id = g.getImageData(0, 0, o.width, o.height), d = id.data, hist = new Uint32Array(256);
+  for (let i = 0; i < d.length; i += 4) { const v = Math.round(0.3 * d[i] + 0.5 * d[i + 1] + 0.2 * d[i + 2]); d[i] = v; hist[v]++; }
+  const N = d.length / 4; let lo = 0, hi = 255, acc = 0;
+  for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc > N * 0.01) { lo = i; break; } }
+  acc = 0; for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc > N * 0.4) { hi = i; break; } }
+  for (let i = 0; i < d.length; i += 4) { const v = Math.max(0, Math.min(255, (d[i] - lo) / Math.max(1, hi - lo) * 255)); d[i] = d[i + 1] = d[i + 2] = v; }
+  g.putImageData(id, 0, 0);
+  return o;
+}
+// fuzzy match of the read text against the ink list (character trigrams — forgiving of misread letters)
+const tri = t => { const s = '  ' + t + ' '; const m = new Map(); for (let i = 0; i < s.length - 2; i++) { const k = s.slice(i, i + 3); m.set(k, (m.get(k) || 0) + 1); } return m; };
+const dice = (A, B) => { let inter = 0, a = 0, b = 0; for (const v of A.values()) a += v; for (const v of B.values()) b += v; for (const [k, v] of A) if (B.has(k)) inter += Math.min(v, B.get(k)); return a + b ? 2 * inter / (a + b) : 0; };
+const cleanTxt = t => norm(t).replace(/[^a-z0-9]+/g, ' ').trim();
+const lev = (a, b) => { const m = a.length, n = b.length; if (!m || !n) return Math.max(m, n); let prev = Array.from({ length: n + 1 }, (_, j) => j); for (let i = 1; i <= m; i++) { const cur = [i]; for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); prev = cur; } return prev[n]; };
+// word level: each word of the ink name against its closest read word ("viamive" ~ "diamine")
+function wordScore(readWords, target) {
+  const tw = target.split(' ').filter(w => w.length >= 3); if (!tw.length || !readWords.length) return 0;
+  let sum = 0, tot = 0;
+  for (const w of tw) { let best = 0; for (const r of readWords) best = Math.max(best, 1 - lev(w, r) / Math.max(w.length, r.length)); sum += best * w.length; tot += w.length; }
+  return sum / tot;
+}
+function matchInks(text) {
+  const clean = cleanTxt(text); if (!clean) return [];
+  const T = tri(clean), words = clean.split(' ').filter(w => w.length >= 2);
+  return live(S.inks).map(i => {
+    const variants = [`${i.brand} ${i.name}`, i.name, `${i.brand} ${i.collection} ${i.name}`, `${i.collection} ${i.name}`].map(v => cleanTxt(v)).filter(Boolean);
+    return { i, s: Math.max(...variants.map(v => Math.max(dice(T, tri(v)), 0.92 * wordScore(words, v)))) };
+  }).sort((a, b) => b.s - a.s).slice(0, 5);
+}
+function pickRecord(kind, title) {
+  return new Promise(res => {
+    const list = kind === 'ink' ? live(S.inks) : live(S.pens);
+    const m = openModal(`<div class="mh"><h2>${esc(title)}</h2><button class="icon-btn" data-close aria-label="Close">${I.x}</button></div>
+      <div class="mb"><div class="search sm">${I.search}<input id="prQ" type="search" placeholder="Search…" autocomplete="off"></div><div id="prL" class="pick-inks" style="margin-top:10px;max-height:60vh"></div></div>`, { onClose: () => res(null) });
+    const draw = q => {
+      const n = norm(q);
+      const rows = list.filter(r => !n || norm(kind === 'ink' ? `${r.brand} ${r.collection} ${r.name}` : penTitle(r)).includes(n)).sort((a, b) => cmp(kind === 'ink' ? a.brand + a.name : penTitle(a), kind === 'ink' ? b.brand + b.name : penTitle(b))).slice(0, 150);
+      $('#prL', m.el).innerHTML = rows.map(r => kind === 'ink'
+        ? `<button class="pi" data-id="${esc(r.id)}"><span class="dot lg" style="background:${esc(inkColor(r))}"></span><span><b>${esc(r.name)}</b><small>${esc(r.brand)}${r.collection ? ' · ' + esc(r.collection) : ''}</small></span></button>`
+        : `<button class="pi" data-id="${esc(r.id)}"><span class="dot lg" style="background:var(--surface2)"></span><span><b>${esc(penTitle(r))}</b><small>${esc(r.nibSize || '')}</small></span></button>`).join('') || '<p class="muted pad">Nothing found</p>';
+      $$('[data-id]', m.el).forEach(b => b.onclick = () => { m.onClose = null; closeModal(); res(b.dataset.id); });
+    };
+    $('#prQ', m.el).oninput = e => draw(e.target.value); draw('');
+    setTimeout(() => $('#prQ', m.el)?.focus(), 100);
+  });
+}
+const urlOf = (cache, blob) => { const u = URL.createObjectURL(blob); cache.push(u); return u; };
+
+async function batchInks() {
+  const files = await pickFiles(); if (!files.length) return;
+  const urls = [];
+  const items = files.map(f => ({ file: f, status: 'waiting', res: null, text: '', matches: [], inkId: '', skip: false }));
+  const m = openModal(`<div class="mh"><div><h2>Batch: swatch cards</h2><p class="sub" id="bSub"></p></div><button class="icon-btn" data-close aria-label="Close">${I.x}</button></div>
+    <div class="mb"><div id="bList" class="batch"></div></div>
+    <div class="mf"><span class="muted small" id="bNote"></span><button class="btn primary" id="bSave" disabled>Save</button></div>`, { wide: true, onClose: () => { cancelled = true; urls.forEach(u => URL.revokeObjectURL(u)); } });
+  let cancelled = false;
+  const el = m.el;
+  const conf = it => !it.matches.length ? 'none' : it.matches[0].s >= 0.6 && it.matches[0].s - (it.matches[1]?.s || 0) >= 0.1 ? 'high' : it.matches[0].s >= 0.4 ? 'check' : 'low';
+  function draw() {
+    const done = items.filter(i => i.status === 'done' || i.status === 'error').length;
+    $('#bSub', el).textContent = done < items.length ? `Processing ${done + 1} of ${items.length}…` : `${items.length} photos · check the matches, then save`;
+    const counts = {}; items.forEach(i => { if (i.inkId && !i.skip) counts[i.inkId] = (counts[i.inkId] || 0) + 1; });
+    $('#bList', el).innerHTML = items.map((it, n) => {
+      const ink = it.inkId && byId(S.inks, it.inkId), c = conf(it);
+      if (it.status !== 'done') return `<div class="b-row ${it.status}"><div class="b-imgs"><span class="b-ph">${it.status === 'error' ? '!' : n + 1}</span></div><div class="b-info"><b>${esc(it.file.name)}</b><small>${it.status === 'error' ? esc(it.error) : it.status === 'waiting' ? 'Waiting…' : esc(it.statusText || 'Working…')}</small></div></div>`;
+      return `<div class="b-row ${it.skip ? 'skip' : ''}">
+        <div class="b-imgs"><img src="${it.swUrl}" alt="Swatch"><img class="wr" src="${it.wrUrl}" alt="Writing"></div>
+        <div class="b-info">
+          <small class="muted">Read: “${esc(it.text.replace(/\s+/g, ' ').trim() || '—')}”${it.res.found ? '' : ' · <span class="err-t">card not found — check with Edit</span>'}${it.res.overexposed ? ' · <span class="err-t">background overexposed</span>' : ''}</small>
+          <button class="b-ink" data-pick="${n}">${ink ? `<i class="dot" style="background:${esc(inkColor(ink))}"></i><b>${esc(ink.name)}</b> <span class="muted">${esc(ink.brand)}</span>` : '<b>Choose ink…</b>'}<span class="b-conf ${ink ? c : 'none'}">${!ink ? 'no match' : c === 'high' ? 'match' : c === 'check' ? 'check' : 'unsure'}</span></button>
+          ${counts[it.inkId] > 1 ? '<small class="err-t">Same ink chosen for more than one photo</small>' : ''}
+          ${ink && byId(S.inks, it.inkId).photos?.card ? '<small class="muted">Replaces the existing swatch photos</small>' : ''}
+          <div class="chips-row">${it.matches.filter(x => x.i.id !== it.inkId).slice(0, 2).map(x => `<button class="chip" data-alt="${n}" data-id="${esc(x.i.id)}">${esc(x.i.name)} <small>${esc(x.i.brand)}</small></button>`).join('')}</div>
+          <div class="row"><button class="btn small" data-edit="${n}">${I.edit}Edit photo</button><button class="btn small ghost" data-skip="${n}">${it.skip ? 'Include' : 'Skip'}</button></div>
+        </div></div>`;
+    }).join('');
+    const ready = items.filter(i => i.status === 'done' && !i.skip && i.inkId);
+    $('#bSave', el).disabled = done < items.length || !ready.length;
+    $('#bSave', el).textContent = `Save ${ready.length}`;
+    $('#bNote', el).textContent = items.some(i => i.status === 'done' && !i.skip && !i.inkId) ? 'Photos without an ink are skipped' : '';
+    $$('[data-pick]', el).forEach(b => b.onclick = async () => { const it = items[+b.dataset.pick]; const id = await pickRecord('ink', 'Which ink is this?'); if (id) { it.inkId = id; draw(); } });
+    $$('[data-alt]', el).forEach(b => b.onclick = () => { items[+b.dataset.alt].inkId = b.dataset.id; draw(); });
+    $$('[data-skip]', el).forEach(b => b.onclick = () => { const it = items[+b.dataset.skip]; it.skip = !it.skip; draw(); });
+    $$('[data-edit]', el).forEach(b => b.onclick = async () => {
+      const it = items[+b.dataset.edit];
+      const r = await openEditor({ file: it.file, mode: 'card', layout: S.layout, title: 'Swatch card', adjust: S.prefs.adjDefault });
+      if (!r) return;
+      it.res = { ...it.res, ...r, found: true, overexposed: false }; it.swUrl = urlOf(urls, r.swatch); it.wrUrl = urlOf(urls, r.writing); draw();
+    });
+  }
+  draw();
+  let worker = null;
+  try { worker = await ocrWorker(t => { items[0].statusText = t; draw(); }); } catch (e) { toast(e.message, true); }
+  for (const it of items) {
+    if (cancelled) return;
+    it.status = 'working'; it.statusText = 'Finding the card…'; draw();
+    try {
+      it.res = await autoProcess(it.file, { mode: 'card', layout: S.layout, adjust: S.prefs.adjDefault });
+      it.swUrl = urlOf(urls, it.res.swatch); it.wrUrl = urlOf(urls, it.res.writing);
+      if (worker) { it.statusText = 'Reading the name…'; draw(); const r = await worker.recognize(ocrPrep(it.res.writingCanvas)); it.text = r.data.text || ''; }
+      it.res.writingCanvas = null;
+      it.matches = matchInks(it.text);
+      const [m1, m2] = it.matches; if (m1 && (m1.s >= 0.4 || (m1.s >= 0.3 && m1.s - (m2?.s || 0) >= 0.08))) it.inkId = m1.i.id;
+      it.status = 'done';
+    } catch (e) { console.error(e); it.status = 'error'; it.error = e.message || 'Could not process this photo'; }
+    draw();
+  }
+  $('#bSave', el).onclick = async () => {
+    const todo = items.filter(i => i.status === 'done' && !i.skip && i.inkId);
+    $('#bSave', el).disabled = true;
+    let n = 0;
+    for (const it of todo) {
+      $('#bSave', el).textContent = `Saving ${++n}/${todo.length}…`;
+      const ink = byId(S.inks, it.inkId); if (!ink) continue;
+      const d = JSON.parse(JSON.stringify(ink)); d.photos ||= {};
+      for (const k of ['card', 'swatch', 'writing', 'cardRaw']) trashImage(ink.photos?.[k]);
+      d.photos.card = await storeImage(it.res.card); d.photos.swatch = await storeImage(it.res.swatch); d.photos.writing = await storeImage(it.res.writing);
+      if (it.res.cardRaw) d.photos.cardRaw = await storeImage(it.res.cardRaw); else delete d.photos.cardRaw;
+      d.hex = it.res.hex; d.colorAdjust = it.res.adjust || null;
+      if (!d.colourGroup || d.colourGuess || d.colourAuto) { d.colourGroup = suggestGroup(d.hex); d.colourAuto = true; d.colourGuess = false; }
+      await saveRec('ink', d);
+    }
+    closeModal(); toast(`Saved swatch photos for ${plural(n, 'ink')}`);
+  };
+}
+
+function batchPens() {
+  const pens = live(S.pens).filter(p => p.status !== 'gone').sort((a, b) => cmp(penTitle(a), penTitle(b)));
+  if (!pens.length) { toast('Add your pens first'); return; }
+  const order = []; let perPen = 2;
+  const m = openModal(`<div class="mh"><div><h2>Batch: pen photos</h2><p class="sub">Tap the pens in the order you photographed them</p></div><button class="icon-btn" data-close aria-label="Close">${I.x}</button></div>
+    <div class="mb">
+      <div class="seg scope" id="bpPer"><button data-n="2">Closed, then posted</button><button data-n="1">Closed only</button></div>
+      <div id="bpPens" class="bp-pens"></div>
+    </div>
+    <div class="mf"><span class="muted small" id="bpN"></span><button class="btn primary" id="bpGo" disabled>${I.image}Choose photos</button></div>`, { wide: true });
+  const el = m.el;
+  const draw = () => {
+    $$('#bpPer button', el).forEach(b => b.classList.toggle('on', +b.dataset.n === perPen));
+    $('#bpPens', el).innerHTML = pens.map(p => { const i = order.indexOf(p.id); return `<button class="bp-pen ${i >= 0 ? 'on' : ''}" data-p="${esc(p.id)}"><span class="bp-n">${i >= 0 ? i + 1 : ''}</span>${penPhoto(p) ? `<img data-img="${esc(penPhoto(p))}" alt="">` : ''}<span><b>${esc(penTitle(p))}</b><small>${esc(p.nibSize || '')}</small></span></button>`; }).join('');
+    $$('[data-p]', el).forEach(b => b.onclick = () => { const id = b.dataset.p, i = order.indexOf(id); if (i >= 0) order.splice(i, 1); else order.push(id); draw(); });
+    $('#bpN', el).textContent = order.length ? `${plural(order.length, 'pen')} → ${order.length * perPen} photos expected` : '';
+    $('#bpGo', el).disabled = !order.length;
+    hydrate(el);
+  };
+  $$('#bpPer button', el).forEach(b => b.onclick = () => { perPen = +b.dataset.n; draw(); });
+  $('#bpGo', el).onclick = async () => {
+    const files = (await pickFiles()).sort((a, b) => (a.lastModified - b.lastModified) || cmp(a.name, b.name));
+    if (!files.length) return;
+    closeModal();
+    setTimeout(() => batchPensReview(order.slice(), perPen, files), 60);
+  };
+  draw();
+}
+async function batchPensReview(order, perPen, files) {
+  const urls = [];
+  const rows = order.map((penId, n) => ({ penId, files: files.slice(n * perPen, n * perPen + perPen), res: [], status: 'waiting', skip: false }));
+  const extra = files.length - order.length * perPen;
+  let cancelled = false;
+  const m = openModal(`<div class="mh"><div><h2>Batch: pen photos</h2><p class="sub" id="bSub"></p></div><button class="icon-btn" data-close aria-label="Close">${I.x}</button></div>
+    <div class="mb">${extra ? `<p class="warn-inline">${extra > 0 ? `${plural(extra, 'photo')} more than expected — the last ones are ignored.` : `${plural(-extra, 'photo')} fewer than expected — the last pens get no photo.`} Photos are paired in the order they were taken.</p>` : ''}<div id="bList" class="batch"></div></div>
+    <div class="mf"><span class="muted small"></span><button class="btn primary" id="bSave" disabled>Save</button></div>`, { wide: true, onClose: () => { cancelled = true; urls.forEach(u => URL.revokeObjectURL(u)); } });
+  const el = m.el;
+  const keys = perPen === 2 ? ['closed', 'posted'] : ['closed'];
+  function draw() {
+    const done = rows.filter(r => r.status !== 'waiting' && r.status !== 'working').length;
+    $('#bSub', el).textContent = done < rows.length ? `Processing ${done + 1} of ${rows.length}…` : 'Check the pairs, then save';
+    $('#bList', el).innerHTML = rows.map((r, n) => {
+      const p = byId(S.pens, r.penId);
+      return `<div class="b-row ${r.skip ? 'skip' : ''}"><div class="b-imgs pen">${keys.map((k, j) => r.res[j] ? `<figure><img src="${r.res[j].url}" alt=""><figcaption>${k === 'closed' ? 'Closed' : 'Posted'}</figcaption></figure>` : `<figure><span class="b-ph">${r.status === 'working' ? '…' : '—'}</span><figcaption>${k === 'closed' ? 'Closed' : 'Posted'}</figcaption></figure>`).join('')}</div>
+        <div class="b-info"><button class="b-ink" data-pick="${n}"><b>${esc(penTitle(p))}</b><span class="muted">${n + 1}</span></button>
+        ${r.error ? `<small class="err-t">${esc(r.error)}</small>` : ''}
+        <div class="row">${perPen === 2 ? `<button class="btn small" data-swap="${n}">⇄ Swap closed / posted</button>` : ''}<button class="btn small ghost" data-skip="${n}">${r.skip ? 'Include' : 'Skip'}</button></div></div></div>`;
+    }).join('');
+    const ready = rows.filter(r => !r.skip && r.res.length);
+    $('#bSave', el).disabled = done < rows.length || !ready.length; $('#bSave', el).textContent = `Save ${plural(ready.length, 'pen')}`;
+    $$('[data-swap]', el).forEach(b => b.onclick = () => { const r = rows[+b.dataset.swap]; r.res.reverse(); draw(); });
+    $$('[data-skip]', el).forEach(b => b.onclick = () => { const r = rows[+b.dataset.skip]; r.skip = !r.skip; draw(); });
+    $$('[data-pick]', el).forEach(b => b.onclick = async () => { const r = rows[+b.dataset.pick]; const id = await pickRecord('pen', 'Which pen is this?'); if (id) { r.penId = id; draw(); } });
+  }
+  draw();
+  for (const r of rows) {
+    if (cancelled) return;
+    r.status = 'working'; draw();
+    try { for (const f of r.files) { const x = await autoProcess(f, { mode: 'photo', adjust: S.prefs.adjDefault }); x.url = urlOf(urls, x.image); r.res.push(x); } r.status = 'done'; }
+    catch (e) { console.error(e); r.status = 'error'; r.error = e.message || 'Could not process'; }
+    draw();
+  }
+  $('#bSave', el).onclick = async () => {
+    const todo = rows.filter(r => !r.skip && r.res.length);
+    $('#bSave', el).disabled = true; let n = 0;
+    for (const r of todo) {
+      $('#bSave', el).textContent = `Saving ${++n}/${todo.length}…`;
+      const pen = byId(S.pens, r.penId); if (!pen) continue;
+      const d = JSON.parse(JSON.stringify(pen)); d.photos ||= {}; d.adjust ||= {};
+      if (d.photos.pen && !d.photos.closed) { d.photos.closed = d.photos.pen; delete d.photos.pen; }
+      for (let j = 0; j < r.res.length; j++) {
+        const k = keys[j], x = r.res[j];
+        trashImage(d.photos[k]); trashImage(d.photos[k + 'Raw']);
+        d.photos[k] = await storeImage(x.image);
+        if (x.imageRaw) d.photos[k + 'Raw'] = await storeImage(x.imageRaw); else delete d.photos[k + 'Raw'];
+        d.adjust[k] = x.adjust || null;
+      }
+      await saveRec('pen', d);
+    }
+    closeModal(); toast(`Saved photos for ${plural(n, 'pen')}`);
+  };
+}
+
 // ───────────────────────── view: Settings ─────────────────────────
 function viewSettings(m) {
   if (RO) {
@@ -1474,6 +1760,11 @@ function viewSettings(m) {
       <div class="row2" style="margin-top:12px"><label class="lbl">Currency symbol<input id="cur" value="${esc(S.prefs.currency)}" maxlength="4"></label><span></span></div>
       <button class="btn small" id="prefSave" style="margin-top:12px">Save</button>
     </section>
+    <section class="card"><h2 class="h2">Batch add photos</h2>
+      <p class="muted">Photograph many swatch cards or pens in one go, then add them all at once.</p>
+      <div class="row wrap"><button class="btn" id="batchInk">${I.image}Swatch cards…</button><button class="btn" id="batchPen">${I.image}Pens…</button></div>
+      <p class="muted small"><b>Swatch cards:</b> the app finds each card, reads the handwritten ink name and suggests the matching ink — you check and confirm. Reading happens on this device (the reader, about 10 MB, downloads once the first time). <b>Pens:</b> you tap the pens in the order you photographed them; photos are paired as closed, then posted, in the order they were taken. Your default colour settings are applied to every photo.</p>
+    </section>
     <section class="card"><h2 class="h2">Swatch card layout</h2>
       <p class="muted">Where the swatch and writing sample sit on your cards. Adjust the boxes while scanning a card and tick “Remember box positions”.</p>
       <p>Card ratio ${esc(S.layout.aspect)} · Swatch ${S.layout.swatch.map(v => Math.round(v * 100)).join('/')} · Writing ${S.layout.writing.map(v => Math.round(v * 100)).join('/')}</p>
@@ -1485,7 +1776,7 @@ function viewSettings(m) {
       <p class="muted">The backup file has all data but not the photos (those are in your Google Drive folder).</p>
     </section>
     <section class="card"><h2 class="h2">Install</h2><p class="muted">On Android: Chrome menu ⋮ → <b>Add to Home screen / Install app</b>. On Windows: the install icon at the right of the Chrome or Edge address bar.</p>${S.installEvt ? '<button class="btn primary" id="install">Install now</button>' : ''}</section>
-    <p class="muted center small">Fountain Pens and Inks · v1.7</p>`;
+    <p class="muted center small">Fountain Pens and Inks · v2.0</p>`;
   $('#titleSave', m).onclick = async () => { S.title = $('#title', m).value.trim() || 'Fountain Pens and Inks'; S.titleUpdatedAt = Date.now(); await db.setMeta('title', { title: S.title, at: S.titleUpdatedAt }); changed(); toast('Saved'); };
   $('#syncNow', m) && ($('#syncNow', m).onclick = () => sync(true));
   $('#signOut', m) && ($('#signOut', m).onclick = () => { drive.signOut(); S.syncState = 'signin'; updateSyncBadge(); renderView(); });
@@ -1499,6 +1790,8 @@ function viewSettings(m) {
   $('#copy', m) && ($('#copy', m).onclick = () => { navigator.clipboard?.writeText(link).then(() => toast('Link copied'), () => { $('#pubLink', m).select(); }); });
   $('#layReset', m).onclick = async () => { S.layout = DEFAULT_LAYOUT; S.layoutUpdatedAt = Date.now(); await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); applyLayoutCSS(); changed(); toast('Box positions reset'); };
   $('#recropAll', m).onclick = () => recropAll();
+  $('#batchInk', m).onclick = () => batchInks();
+  $('#batchPen', m).onclick = () => batchPens();
   $('#prefSave', m).onclick = async () => { S.prefs = { ...S.prefs, cleanDays: Math.max(1, +$('#cDays', m).value || 28), cleanDaysRisky: Math.max(1, +$('#cDaysR', m).value || 14), currency: $('#cur', m).value.trim() || '€' }; S.prefsUpdatedAt = Date.now(); await db.setMeta('prefs', { prefs: S.prefs, at: S.prefsUpdatedAt }); changed(); toast('Saved'); };
   $('#xlsx', m).onclick = exportExcel;
   $('#bak', m).onclick = () => downloadBlob(new Blob([JSON.stringify(buildCatalog(), null, 1)], { type: 'application/json' }), `fountain-pens-and-inks-backup-${today()}.json`);
@@ -1576,7 +1869,7 @@ async function loadLocal() {
   Object.assign(S, { inks, pens, fills, meta: local || {}, imageMap: imageMap || {} });
   if (layout) { S.layout = layout.layout; S.layoutUpdatedAt = layout.at; }
   // box positions saved from an earlier default follow the new default
-  const OLD = { writing: ['[0.03,0.73,0.94,0.255]', '[0.03,0.73,0.94,0.142]'], swatch: ['[0.085,0.065,0.83,0.59]'] };
+  const OLD = { writing: ['[0.03,0.73,0.94,0.255]', '[0.03,0.73,0.94,0.142]', '[0.03,0.73,0.94,0.15]'], swatch: ['[0.085,0.065,0.83,0.59]'] };
   if (S.layout) for (const k of ['swatch', 'writing']) if (OLD[k].includes(JSON.stringify(S.layout[k]))) S.layout = { ...S.layout, [k]: DEFAULT_LAYOUT[k] };
   applyLayoutCSS();
   if (title) { S.title = title.title; S.titleUpdatedAt = title.at; }
