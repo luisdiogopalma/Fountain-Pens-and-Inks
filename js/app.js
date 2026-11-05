@@ -828,7 +828,7 @@ function pickFile(source = 'gallery') {
   return new Promise(res => {
     const inp = document.createElement('input');
     inp.type = 'file'; inp.accept = 'image/*';
-    if (source === 'camera') inp.capture = 'environment';
+    if (source === 'camera') inp.setAttribute('capture', 'environment');
     inp.onchange = () => res(inp.files[0] || null);
     inp.addEventListener('cancel', () => res(null));
     inp.click();
@@ -1565,8 +1565,32 @@ function pickRecord(kind, title) {
 }
 const urlOf = (cache, blob) => { const u = URL.createObjectURL(blob); cache.push(u); return u; };
 
-async function batchInks() {
-  const files = await pickFiles(); if (!files.length) return;
+// Camera session: take photos one after another (each tap opens the camera). With prompts, it guides the order.
+function captureSession({ title, prompts = null, hint = '' }) {
+  return new Promise(res => {
+    const shots = [];
+    const m = openModal(`<div class="mh"><div><h2>${esc(title)}</h2><p class="sub">${esc(hint)}</p></div><button class="icon-btn" data-close aria-label="Close">${I.x}</button></div>
+      <div class="mb"><div class="cs-next" id="csNext"></div><div class="cs-grid" id="csGrid"></div></div>
+      <div class="mf"><button class="btn ghost" id="csUndo">Retake last</button><button class="btn primary" id="csDone" disabled>Done</button></div>`, { wide: true, onClose: () => { shots.forEach(s => URL.revokeObjectURL(s.url)); res(null); } });
+    const el = m.el;
+    const draw = () => {
+      const next = prompts ? prompts[shots.length] : `Photo ${shots.length + 1}`;
+      $('#csNext', el).innerHTML = next ? `<div class="cs-prompt">${prompts ? `<small>${shots.length + 1} of ${prompts.length}</small>` : ''}<b>${esc(next)}</b></div><button class="btn primary cs-shoot" id="csShoot">${I.camera}Take photo</button>` : '<p class="cs-prompt"><b>All photos taken</b> — tap Done.</p>';
+      $('#csGrid', el).innerHTML = shots.map((s, i) => `<figure><img src="${s.url}" alt=""><figcaption>${esc(prompts ? prompts[i] : `Photo ${i + 1}`)}</figcaption></figure>`).join('');
+      $('#csUndo', el).disabled = !shots.length;
+      $('#csDone', el).disabled = !shots.length;
+      $('#csDone', el).textContent = prompts && shots.length < prompts.length ? `Done (${shots.length} of ${prompts.length})` : `Done (${shots.length})`;
+      $('#csShoot', el) && ($('#csShoot', el).onclick = async () => { const f = await pickFile('camera'); if (f) { shots.push({ file: f, url: URL.createObjectURL(f) }); draw(); const g = $('#csGrid', el); g.lastElementChild?.scrollIntoView({ block: 'nearest' }); } });
+    };
+    $('#csUndo', el).onclick = () => { const s = shots.pop(); if (s) URL.revokeObjectURL(s.url); draw(); };
+    $('#csDone', el).onclick = () => { const files = shots.map(s => s.file); m.onClose = () => shots.forEach(s => URL.revokeObjectURL(s.url)); closeModal(); res(files); };
+    draw();
+  });
+}
+async function batchInks(source = 'gallery') {
+  const files = source === 'camera' ? await captureSession({ title: 'Photograph swatch cards', hint: 'Take one photo per card. Any order — the names are read afterwards.' }) : await pickFiles();
+  if (!files || !files.length) return;
+  await new Promise(r => setTimeout(r, 60));
   const urls = [];
   const items = files.map(f => ({ file: f, status: 'waiting', res: null, text: '', matches: [], inkId: '', skip: false }));
   const m = openModal(`<div class="mh"><div><h2>Batch: swatch cards</h2><p class="sub" id="bSub"></p></div><button class="icon-btn" data-close aria-label="Close">${I.x}</button></div>
@@ -1652,14 +1676,14 @@ function batchPens() {
       <div class="seg scope" id="bpPer"><button data-n="2">Closed, then posted</button><button data-n="1">Closed only</button></div>
       <div id="bpPens" class="bp-pens"></div>
     </div>
-    <div class="mf"><span class="muted small" id="bpN"></span><button class="btn primary" id="bpGo" disabled>${I.image}Choose photos</button></div>`, { wide: true });
+    <div class="mf"><span class="muted small" id="bpN"></span><div class="row">${CAN_CAMERA ? `<button class="btn primary" id="bpCam" disabled>${I.camera}Take photos</button>` : ''}<button class="btn ${CAN_CAMERA ? '' : 'primary'}" id="bpGo" disabled>${I.image}${CAN_CAMERA ? 'From gallery' : 'Choose photos'}</button></div></div>`, { wide: true });
   const el = m.el;
   const draw = () => {
     $$('#bpPer button', el).forEach(b => b.classList.toggle('on', +b.dataset.n === perPen));
     $('#bpPens', el).innerHTML = pens.map(p => { const i = order.indexOf(p.id); return `<button class="bp-pen ${i >= 0 ? 'on' : ''}" data-p="${esc(p.id)}"><span class="bp-n">${i >= 0 ? i + 1 : ''}</span>${penPhoto(p) ? `<img data-img="${esc(penPhoto(p))}" alt="">` : ''}<span><b>${esc(penTitle(p))}</b><small>${esc(p.nibSize || '')}</small></span></button>`; }).join('');
     $$('[data-p]', el).forEach(b => b.onclick = () => { const id = b.dataset.p, i = order.indexOf(id); if (i >= 0) order.splice(i, 1); else order.push(id); draw(); });
     $('#bpN', el).textContent = order.length ? `${plural(order.length, 'pen')} → ${order.length * perPen} photos expected` : '';
-    $('#bpGo', el).disabled = !order.length;
+    $('#bpGo', el).disabled = !order.length; $('#bpCam', el) && ($('#bpCam', el).disabled = !order.length);
     hydrate(el);
   };
   $$('#bpPer button', el).forEach(b => b.onclick = () => { perPen = +b.dataset.n; draw(); });
@@ -1669,6 +1693,16 @@ function batchPens() {
     closeModal();
     setTimeout(() => batchPensReview(order.slice(), perPen, files), 60);
   };
+  // camera: guided — the app tells you which pen and which view to shoot next
+  $('#bpCam', el) && ($('#bpCam', el).onclick = async () => {
+    const ord = order.slice(), per = perPen;
+    const prompts = ord.flatMap(id => { const t = penTitle(byId(S.pens, id)); return per === 2 ? [`${t} — closed`, `${t} — posted`] : [`${t} — closed`]; });
+    closeModal();
+    await new Promise(r => setTimeout(r, 60));
+    const files = await captureSession({ title: 'Photograph pens', prompts, hint: 'Follow the prompts — each photo goes to the pen shown.' });
+    if (!files || !files.length) return;
+    setTimeout(() => batchPensReview(ord, per, files), 60);
+  });
   draw();
 }
 async function batchPensReview(order, perPen, files) {
@@ -1762,7 +1796,8 @@ function viewSettings(m) {
     </section>
     <section class="card"><h2 class="h2">Batch add photos</h2>
       <p class="muted">Photograph many swatch cards or pens in one go, then add them all at once.</p>
-      <div class="row wrap"><button class="btn" id="batchInk">${I.image}Swatch cards…</button><button class="btn" id="batchPen">${I.image}Pens…</button></div>
+      <div class="batch-btns"><span class="lbl-inline">Swatch cards</span>${CAN_CAMERA ? `<button class="btn" id="batchInkCam">${I.camera}Take photos</button>` : ''}<button class="btn" id="batchInk">${I.image}${CAN_CAMERA ? 'From gallery' : 'Choose photos'}</button></div>
+      <div class="batch-btns"><span class="lbl-inline">Pens</span><button class="btn" id="batchPen">${I.pen}Choose pens…</button></div>
       <p class="muted small"><b>Swatch cards:</b> the app finds each card, reads the handwritten ink name and suggests the matching ink — you check and confirm. Reading happens on this device (the reader, about 10 MB, downloads once the first time). <b>Pens:</b> you tap the pens in the order you photographed them; photos are paired as closed, then posted, in the order they were taken. Your default colour settings are applied to every photo.</p>
     </section>
     <section class="card"><h2 class="h2">Swatch card layout</h2>
@@ -1776,7 +1811,7 @@ function viewSettings(m) {
       <p class="muted">The backup file has all data but not the photos (those are in your Google Drive folder).</p>
     </section>
     <section class="card"><h2 class="h2">Install</h2><p class="muted">On Android: Chrome menu ⋮ → <b>Add to Home screen / Install app</b>. On Windows: the install icon at the right of the Chrome or Edge address bar.</p>${S.installEvt ? '<button class="btn primary" id="install">Install now</button>' : ''}</section>
-    <p class="muted center small">Fountain Pens and Inks · v2.0</p>`;
+    <p class="muted center small">Fountain Pens and Inks · v2.1</p>`;
   $('#titleSave', m).onclick = async () => { S.title = $('#title', m).value.trim() || 'Fountain Pens and Inks'; S.titleUpdatedAt = Date.now(); await db.setMeta('title', { title: S.title, at: S.titleUpdatedAt }); changed(); toast('Saved'); };
   $('#syncNow', m) && ($('#syncNow', m).onclick = () => sync(true));
   $('#signOut', m) && ($('#signOut', m).onclick = () => { drive.signOut(); S.syncState = 'signin'; updateSyncBadge(); renderView(); });
@@ -1790,7 +1825,8 @@ function viewSettings(m) {
   $('#copy', m) && ($('#copy', m).onclick = () => { navigator.clipboard?.writeText(link).then(() => toast('Link copied'), () => { $('#pubLink', m).select(); }); });
   $('#layReset', m).onclick = async () => { S.layout = DEFAULT_LAYOUT; S.layoutUpdatedAt = Date.now(); await db.setMeta('layout', { layout: S.layout, at: S.layoutUpdatedAt }); applyLayoutCSS(); changed(); toast('Box positions reset'); };
   $('#recropAll', m).onclick = () => recropAll();
-  $('#batchInk', m).onclick = () => batchInks();
+  $('#batchInk', m).onclick = () => batchInks('gallery');
+  $('#batchInkCam', m) && ($('#batchInkCam', m).onclick = () => batchInks('camera'));
   $('#batchPen', m).onclick = () => batchPens();
   $('#prefSave', m).onclick = async () => { S.prefs = { ...S.prefs, cleanDays: Math.max(1, +$('#cDays', m).value || 28), cleanDaysRisky: Math.max(1, +$('#cDaysR', m).value || 14), currency: $('#cur', m).value.trim() || '€' }; S.prefsUpdatedAt = Date.now(); await db.setMeta('prefs', { prefs: S.prefs, at: S.prefsUpdatedAt }); changed(); toast('Saved'); };
   $('#xlsx', m).onclick = exportExcel;
