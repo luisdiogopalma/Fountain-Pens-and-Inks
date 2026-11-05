@@ -53,10 +53,16 @@ This creates a "key" that lets *your* app save into *your* Google Drive. Google 
 ## Scanning swatch cards
 
 **Tips for the photo**
-- Put the card on a **dark or coloured surface** (a dark notebook cover, cloth or desk). The app finds the card by its edges, and a dark background makes them obvious. A white sheet behind the card makes it *harder*, not easier.
-- You don't need white paper for white balance: the card's own white border is the reference.
-- Use even light without glare (a light box is great). Shoot roughly from above, but small tilts are corrected automatically.
-- If the card isn't found, the app tries to locate the swatch square and works out the card from it. You can always drag the corners.
+- A **lightbox with a white background** is ideal. The app takes the white balance from the background around the card (a truer white than the card's cream paper). You can drag the pink target anywhere on the photo, or switch to "Card paper".
+- Keep the background just below pure white: if it's blown out, it can't correct colour. Lower the camera exposure a step if the app warns you.
+- The card is found from its edges and from the swatch square, so it works on white too. You can always drag the corners.
+- For the truest colours: high-CRI light (CRI 95+), the camera's white balance fixed to the lightbox's colour temperature (Pro mode) if possible, and no "vivid" display mode on the phone.
+
+**Adjusting colour** — in step 2, tap **🎨 Adjust colour**: Light (exposure, contrast, highlights, shadows, whites, blacks), Colour (temperature, tint, vibrance, saturation), **Hue ranges** (hue / saturation / luminance for reds, oranges, yellows, greens, aquas, blues, purples, magentas separately) and Detail (texture, for shimmer). Hold **Hold to see original** to compare, and tick **Use as default for new photos** to reuse settings for your lightbox. The unedited photo is kept, so you can re-edit any time (Edit → Adjust boxes & colour; on pens, the 🎨 button on the photo).
+
+**Batch add photos** (Settings → Batch add photos):
+- **Swatch cards…** — choose all your card photos at once. Each card is found, straightened, white-balanced from the lightbox and given your default colour settings; the handwritten name is read on the phone (a ~10 MB reader downloads once, then works offline) and matched to your inks. Check each match (green = match, amber = check), change any with a tap, use **Edit photo** if a card wasn't cut right, then **Save**.
+- **Pens…** — tap your pens in the order you photographed them and choose "Closed, then posted" or "Closed only", then pick the photos. They're paired in the order they were taken; use **Swap** if a closed/posted pair is reversed.
 
 **Inks → (an ink) → Add swatch card photo** (or **Edit → Scan swatch card**):
 1. Take the photo with the camera, or pick one from the gallery. The app finds the card and puts the 4 corners on it. If they're off, drag them; a magnifier helps you place them precisely.
