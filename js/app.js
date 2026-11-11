@@ -1442,7 +1442,7 @@ function drawOverTime(box, fills) {
   const max = Math.max(1, ...cols.map(tot));
   const colLabel = k => P.mode === 'year' ? MONTHS[k] : String(k + 1);
   const chart = `<div class="tchart ${P.mode}" role="img" aria-label="Fills per ${P.mode === 'year' ? 'month' : 'day'}">
-    <div class="tc-grid"><span>${max}</span><span>${Math.round(max / 2)}</span><span>0</span></div>
+    <div class="tc-grid"><span>${max}</span><span>${max >= 2 ? Math.round(max / 2) : ''}</span><span>0</span></div>
     <div class="tc-bars">${cols.map((c, k) => { const t = tot(c); const tip = `${colLabel(k)}${P.mode === 'month' ? ' ' + MONTHS[P.m] : ''}: ${plural(t, 'fill')}${t ? ' — ' + order.filter(g => c[g]).map(g => `${g} ${c[g]}`).join(', ') : ''}`;
       return `<div class="tc-col" title="${esc(tip)}" ${P.mode === 'year' ? `data-month="${k}"` : ''}><div class="tc-stack" style="height:${t / max * 100}%">${order.filter(g => c[g]).map(g => `<i style="flex:${c[g]};background:${colOf(g)}"></i>`).join('')}</div><span class="tc-x">${P.mode === 'year' || (k + 1) % 5 === 0 || k === 0 ? colLabel(k) : ''}</span></div>`; }).join('')}</div></div>`;
   const cg = {}; list.forEach(f => { const g = groupOf(f); cg[g] = (cg[g] || 0) + 1; });
@@ -1534,8 +1534,14 @@ const lev = (a, b) => { const m = a.length, n = b.length; if (!m || !n) return M
 // word level: each word of the ink name against its closest read word ("viamive" ~ "diamine")
 function wordScore(readWords, target) {
   const tw = target.split(' ').filter(w => w.length >= 3); if (!tw.length || !readWords.length) return 0;
+  // each read word can match only one word of the name (so "Viamine" can't count as both "Diamine" and "Marine")
+  const pairs = [];
+  tw.forEach((w, i) => readWords.forEach((r, j) => pairs.push([1 - lev(w, r) / Math.max(w.length, r.length), i, j])));
+  pairs.sort((a, b) => b[0] - a[0]);
+  const usedT = new Set(), usedR = new Set(), best = new Array(tw.length).fill(0);
+  for (const [sc, i, j] of pairs) { if (usedT.has(i) || usedR.has(j)) continue; usedT.add(i); usedR.add(j); best[i] = sc; }
   let sum = 0, tot = 0;
-  for (const w of tw) { let best = 0; for (const r of readWords) best = Math.max(best, 1 - lev(w, r) / Math.max(w.length, r.length)); sum += best * w.length; tot += w.length; }
+  tw.forEach((w, i) => { sum += best[i] * w.length; tot += w.length; });
   return sum / tot;
 }
 function matchInks(text) {
@@ -1771,6 +1777,10 @@ function viewSettings(m) {
   const hasKey = !!(CFG.apiKey || localStorage.getItem('ink.apiKey'));
   m.innerHTML = `
     <header class="vh"><div><h1>Settings</h1></div></header>
+    <section class="card"><h2 class="h2">Theme</h2>
+      <div class="seg wide" id="themeSeg">${[['auto', 'Auto (phone)'], ['light', 'Light'], ['dark', 'Dark']].map(([k, n]) => `<button type="button" data-t="${k}">${n}</button>`).join('')}</div>
+      <p class="muted small" style="margin-top:8px">Dark uses true black, which saves battery on OLED screens. This choice is for this device only.</p>
+    </section>
     <section class="card"><h2 class="h2">Collection name</h2><div class="row"><input id="title" value="${esc(S.title)}"><button class="btn" id="titleSave">Save</button></div></section>
     <section class="card"><h2 class="h2">Google Drive sync</h2>
       ${conf ? `
@@ -1811,7 +1821,9 @@ function viewSettings(m) {
       <p class="muted">The backup file has all data but not the photos (those are in your Google Drive folder).</p>
     </section>
     <section class="card"><h2 class="h2">Install</h2><p class="muted">On Android: Chrome menu ⋮ → <b>Add to Home screen / Install app</b>. On Windows: the install icon at the right of the Chrome or Edge address bar.</p>${S.installEvt ? '<button class="btn primary" id="install">Install now</button>' : ''}</section>
-    <p class="muted center small">Fountain Pens and Inks · v2.1</p>`;
+    <p class="muted center small">Fountain Pens and Inks · v2.2</p>`;
+  const curTheme = (() => { try { return localStorage.getItem('ink.theme') || 'auto'; } catch (e) { return 'auto'; } })();
+  $$('#themeSeg button', m).forEach(b => { b.classList.toggle('on', b.dataset.t === curTheme); b.onclick = () => { applyTheme(b.dataset.t); $$('#themeSeg button', m).forEach(x => x.classList.toggle('on', x === b)); }; });
   $('#titleSave', m).onclick = async () => { S.title = $('#title', m).value.trim() || 'Fountain Pens and Inks'; S.titleUpdatedAt = Date.now(); await db.setMeta('title', { title: S.title, at: S.titleUpdatedAt }); changed(); toast('Saved'); };
   $('#syncNow', m) && ($('#syncNow', m).onclick = () => sync(true));
   $('#signOut', m) && ($('#signOut', m).onclick = () => { drive.signOut(); S.syncState = 'signin'; updateSyncBadge(); renderView(); });
@@ -1866,6 +1878,13 @@ async function recropAll() {
     } catch (e) { console.warn(e); failed++; }
   }
   toast(`Re-cut ${plural(done, 'card')}${failed ? ` · ${failed} couldn't be loaded (sign in to Google and try again)` : ''}`, !!failed);
+}
+function applyTheme(t) {
+  try { if (t === 'auto') localStorage.removeItem('ink.theme'); else localStorage.setItem('ink.theme', t); } catch (e) {}
+  const root = document.documentElement;
+  if (t === 'auto') delete root.dataset.theme; else root.dataset.theme = t;
+  const metas = document.querySelectorAll('meta[name=theme-color]');
+  metas.forEach((mm, i) => { if (t === 'auto') { mm.setAttribute('media', i ? '(prefers-color-scheme: dark)' : '(prefers-color-scheme: light)'); mm.content = i ? '#000000' : '#ffffff'; } else { mm.removeAttribute('media'); mm.content = t === 'dark' ? '#000000' : '#ffffff'; } });
 }
 function downloadBlob(blob, name) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
