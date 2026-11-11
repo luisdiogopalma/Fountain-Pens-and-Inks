@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Fountain Pens and Inks</title>
 <meta name="description" content="My fountain pens and inks">
-<meta name="theme-color" content="#f5f2ea" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#131519" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<script>try { var t = localStorage.getItem('ink.theme'); if (t === 'light' || t === 'dark') { document.documentElement.dataset.theme = t; document.querySelectorAll('meta[name=theme-color]').forEach(function (m) { m.content = t === 'dark' ? '#000000' : '#ffffff'; m.removeAttribute('media'); }); } } catch (e) {}</script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-192.png">

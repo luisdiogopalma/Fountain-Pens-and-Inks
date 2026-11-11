@@ -1,16 +1,20 @@
 :root {
-  --bg: #f5f2ea; --surface: #fffdf8; --surface2: #ede8dc; --text: #1b1f2c; --muted: #6d6a62; --line: #e0d9c9;
-  --accent: #24468a; --accent-2: #e3e9f6; --on-accent: #fff; --danger: #b3261e; --ok: #2e7d4f; --warn: #a66300;
-  --shadow: 0 1px 2px rgba(40, 30, 10, .06), 0 4px 14px rgba(40, 30, 10, .06);
+  --bg: #ffffff; --surface: #ffffff; --surface2: #f1f1f3; --text: #111114; --muted: #6b6b72; --line: #e4e4e8;
+  --accent: #24468a; --accent-2: #e8eef9; --on-accent: #fff; --danger: #b3261e; --ok: #2e7d4f; --warn: #a66300;
+  --shadow: 0 0 0 1px #ececf0, 0 2px 8px rgba(0, 0, 0, .05);
   --r: 14px; --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color-scheme: light;
 }
+/* Night: true black for OLED screens. Follows the device unless a theme is chosen in Settings (data-theme). */
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #131519; --surface: #1b1e24; --surface2: #262a32; --text: #ece8df; --muted: #9c988f; --line: #2f333c;
-    --accent: #9db7ff; --accent-2: #232d45; --on-accent: #0f1530; --danger: #ff8a80; --ok: #7ccf9a; --warn: #f0b35a;
-    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.25); color-scheme: dark; }
+  :root:not([data-theme="light"]) { --bg: #000000; --surface: #0f0f11; --surface2: #1b1b1e; --text: #f2f2f3; --muted: #9a9aa1; --line: #232327;
+    --accent: #9db7ff; --accent-2: #18213a; --on-accent: #0f1530; --danger: #ff8a80; --ok: #7ccf9a; --warn: #f0b35a;
+    --shadow: 0 0 0 1px #1c1c20; color-scheme: dark; }
 }
+:root[data-theme="dark"] { --bg: #000000; --surface: #0f0f11; --surface2: #1b1b1e; --text: #f2f2f3; --muted: #9a9aa1; --line: #232327;
+  --accent: #9db7ff; --accent-2: #18213a; --on-accent: #0f1530; --danger: #ff8a80; --ok: #7ccf9a; --warn: #f0b35a;
+  --shadow: 0 0 0 1px #1c1c20; color-scheme: dark; }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 var(--sans); -webkit-tap-highlight-color: transparent; }
